@@ -1,0 +1,767 @@
+package com.x3hub.app.ui
+
+import android.app.Activity
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.util.LruCache
+import android.view.Gravity
+import android.view.View
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.x3hub.app.R
+import com.x3hub.app.core.bridge.HudPinStore
+import com.x3hub.app.core.bridge.HudPinStore.HudPin
+import com.x3hub.app.core.live.LiveCardEngine
+import com.x3hub.app.core.tools.BrowserTool
+import java.net.URL
+import java.util.Locale
+
+/**
+ * HUD pin board — renders the user's pinned notes / pictures / live
+ * cards into the area under the HUD strip. Ported from TapInsight
+ * beta6-gold; X3Gemini changes:
+ *
+ *   • The pin zone is the WHOLE under-HUD area (no browser to avoid),
+ *     hard-clamped inside the logical 640×480 viewport.
+ *   • No URL opening: notes are inert (tap does nothing), live cards
+ *     tap-to-refresh, pictures open the fullscreen viewer.
+ *
+ * Interaction model (glasses trackpad) is unchanged:
+ *   • Tap a pin → open it (picture → fullscreen viewer, live card →
+ *     refresh now).
+ *   • DOUBLE-TAP with the cursor over a pin → "hud modify" mode: the
+ *     pin highlights and grows an ✕ (delete) chip. The NEXT tap ends
+ *     the mode immediately: on ✕ → delete; anywhere else → the pin
+ *     moves to that spot (clamped to the zone) and the position
+ *     persists. Double-tap again also exits without changes.
+ *
+ * Threading: HudPinStore listeners fire on the mutating thread (a
+ * voice-tool coroutine when Gemini pins something) — every mutation
+ * hops to main via [uiHandler] before touching views.
+ */
+class HudPinBoardController(
+    private val activity: Activity,
+    private val board: FrameLayout,
+    private val uiHandler: Handler,
+    private val forceCursorVisible: () -> Unit,
+    private val showToast: (String) -> Unit
+) {
+
+    private val density = activity.resources.displayMetrics.density
+    private fun dp(v: Int): Int = (v * density).toInt()
+
+    private var subscription: AutoCloseable? = null
+    private val pinViews = LinkedHashMap<String, FrameLayout>() // pin id → container
+    private var pinsSnapshot: List<HudPin> = emptyList()
+
+    /**
+     * Countdown pin id → the TextView showing its remaining time, plus the
+     * deadline. The 1s tick writes ONLY into these views: render() rebuilds
+     * the whole board and exits modify mode, so ticking through it would
+     * fight the user mid pin-drag once a second.
+     */
+    private val countdownViews = LinkedHashMap<String, Pair<TextView, Long>>()
+    private var tickerRunning = false
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (!tickerRunning) return
+            val now = System.currentTimeMillis()
+            countdownViews.forEach { (_, tv) -> tv.first.text = remainingText(tv.second, now) }
+            uiHandler.postDelayed(this, 1000L)
+        }
+    }
+
+    // hud-modify state
+    private var modifyPinId: String? = null
+    private var fullscreenView: FrameLayout? = null
+
+    private val bitmapCache = LruCache<String, Bitmap>(8)
+
+    fun start() {
+        HudPinStore.init(activity)
+        subscription?.runCatching { close() }
+        subscription = HudPinStore.observe { pins ->
+            uiHandler.post { render(pins) }
+        }
+    }
+
+    fun stop() {
+        subscription?.runCatching { close() }
+        subscription = null
+        stopTicker()
+    }
+
+    /** Re-slot the grid after HUD geometry changes (camera preview on/off). */
+    fun refreshZone() {
+        if (pinViews.isEmpty() && pinsSnapshot.isEmpty()) return
+        render(pinsSnapshot)
+    }
+
+    // ------------------------------------------------------------------
+    // Zone geometry
+    // ------------------------------------------------------------------
+
+    /** Pin zone in BOARD-local px (board is match_parent in the overlay). */
+    private data class Zone(val left: Int, val top: Int, val right: Int, val bottom: Int)
+
+    private fun boardLocalX(view: View): Int {
+        val a = IntArray(2); val b = IntArray(2)
+        view.getLocationOnScreen(a); board.getLocationOnScreen(b)
+        return a[0] - b[0]
+    }
+
+    private fun boardLocalY(view: View): Int {
+        val a = IntArray(2); val b = IntArray(2)
+        view.getLocationOnScreen(a); board.getLocationOnScreen(b)
+        return a[1] - b[1]
+    }
+
+    /** Zone from the LAST render — carried pins clamp against this. */
+    private var lastZone: Zone? = null
+
+    private fun computeZone(): Zone {
+        // The whole area under the HUD strip. The strip is 36px tall at
+        // y=2, so content starts at y=44 (same top line as TapInsight's
+        // calibrated shelf); the rest of the logical viewport is ours.
+        val right = if (board.width > 0) board.width - 6 else UNDER_HUD_ZONE.right
+        val bottom = if (board.height > 0) board.height - 6 else UNDER_HUD_ZONE.bottom
+        return Zone(UNDER_HUD_ZONE.left, UNDER_HUD_ZONE.top, right, maxOf(bottom, UNDER_HUD_ZONE.top + 28))
+    }
+
+    /** Clamp a pin's margins so its rect stays fully inside [zone]. */
+    private fun clampToZone(lp: FrameLayout.LayoutParams, w: Int, h: Int, zone: Zone) {
+        lp.leftMargin = lp.leftMargin.coerceIn(zone.left, maxOf(zone.left, zone.right - w))
+        lp.topMargin = lp.topMargin.coerceIn(zone.top, maxOf(zone.top, zone.bottom - h))
+    }
+
+    // ------------------------------------------------------------------
+    // Rendering
+    // ------------------------------------------------------------------
+
+    private fun render(pins: List<HudPin>) {
+        pinsSnapshot = pins
+        exitModifyMode()
+        board.removeAllViews()
+        pinViews.clear()
+        // The views the ticker writes into are about to be discarded.
+        countdownViews.clear()
+        if (pins.isEmpty()) {
+            stopTicker()
+            return
+        }
+        if (board.width <= 0) {
+            // pre-layout — retry once the overlay has real bounds
+            stopTicker()
+            board.post { if (board.width > 0) render(pinsSnapshot) }
+            return
+        }
+
+        val zone = computeZone()
+        lastZone = zone
+        val gap = dp(6)
+        var x = zone.left
+        var y = zone.top
+        var rowH = 0
+
+        // TWO passes: custom-positioned pins first, so the flow grid can
+        // route around every one of them regardless of store order.
+        val customRects = mutableListOf<IntArray>() // [l, t, r, b]
+        // The camera preview shares the zone — while it's visible, treat
+        // its rect as a blocker so grid pins never tile underneath it.
+        activity.findViewById<View?>(R.id.unipanelCameraPreviewFrame)?.let { cam ->
+            if (cam.visibility == View.VISIBLE && cam.width > 0) {
+                val l = boardLocalX(cam)
+                val t = boardLocalY(cam)
+                customRects += intArrayOf(l, t, l + cam.width, t + cam.height)
+            }
+        }
+        val ordered = pins.sortedBy { if (it.customX >= 0 && it.customY >= 0) 0 else 1 }
+        for (pin in ordered) {
+            val container = buildPinView(pin)
+            val w = container.layoutParams.width
+            val h = container.layoutParams.height
+            val lp = container.layoutParams as FrameLayout.LayoutParams
+            if (pin.customX >= 0 && pin.customY >= 0) {
+                lp.leftMargin = pin.customX
+                lp.topMargin = pin.customY
+                clampToZone(lp, w, h, zone)
+                customRects += intArrayOf(
+                    lp.leftMargin, lp.topMargin, lp.leftMargin + w, lp.topMargin + h
+                )
+            } else {
+                // Flow grid: wrap at the zone's right edge, skip past any
+                // custom pin the candidate cell would overlap, and hard-
+                // clamp the result inside the zone.
+                var guard = 0
+                while (guard++ < 64) {
+                    if (x + w > zone.right && x > zone.left) {
+                        x = zone.left
+                        y += rowH + gap
+                        rowH = 0
+                        continue
+                    }
+                    val blocker = customRects.firstOrNull { r ->
+                        x < r[2] + gap && x + w + gap > r[0] &&
+                            y < r[3] + gap && y + h + gap > r[1]
+                    }
+                    if (blocker != null) {
+                        x = blocker[2] + gap
+                        continue
+                    }
+                    break
+                }
+                lp.leftMargin = x
+                lp.topMargin = y
+                clampToZone(lp, w, h, zone)
+                x = lp.leftMargin + w + gap
+                y = lp.topMargin
+                rowH = maxOf(rowH, h)
+            }
+            container.layoutParams = lp
+            board.addView(container)
+            pinViews[pin.id] = container
+        }
+        syncTicker()
+    }
+
+    // ------------------------------------------------------------------
+    // Countdown ticking
+    // ------------------------------------------------------------------
+
+    /** Run the 1s tick only while countdown chips are actually on screen. */
+    private fun syncTicker() {
+        if (countdownViews.isEmpty()) {
+            stopTicker()
+            return
+        }
+        if (tickerRunning) return
+        tickerRunning = true
+        // Immediate first pass so a just-pinned chip never shows a stale
+        // value for up to a second.
+        ticker.run()
+    }
+
+    private fun stopTicker() {
+        tickerRunning = false
+        uiHandler.removeCallbacks(ticker)
+    }
+
+    /** `m:ss`, or `h:mm:ss` past the hour. Overdue chips read "now". */
+    private fun remainingText(dueAtMs: Long, now: Long): String {
+        val secs = (dueAtMs - now + 999L) / 1000L
+        if (secs <= 0L) return "now"
+        val h = secs / 3600L
+        val m = (secs % 3600L) / 60L
+        val s = secs % 60L
+        return if (h > 0L) {
+            String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+        } else {
+            String.format(Locale.US, "%d:%02d", m, s)
+        }
+    }
+
+    /**
+     * Live browser windows, kept alive across board relayouts.
+     *
+     * Every other pin type is cheap to rebuild, so the board simply throws the
+     * views away and makes new ones whenever the store changes. A WebView is
+     * not cheap and, more to the point, it holds STATE the wearer cares about:
+     * the page, its scroll position, its history, whatever is playing. Rebuild
+     * one and a browser window silently resets itself every time an unrelated
+     * pin appears. So browser views are created once per pin id and reused.
+     */
+    private val browserWindows = LinkedHashMap<String, BrowserWindowView>()
+
+    /** The live window for a pin, created on first sight. */
+    fun browserWindowFor(pin: HudPin): BrowserWindowView =
+        browserWindows.getOrPut(pin.id) {
+            BrowserWindowView(activity).also { w ->
+                w.onExitRequested = { forceCursorVisible() }
+                if (pin.payload.isNotBlank()) w.loadUrl(pin.payload)
+            }
+        }
+
+    /** The window under a screen point, if any — for click/gesture routing. */
+    fun browserWindowAt(screenX: Float, screenY: Float): BrowserWindowView? =
+        browserWindows.values.firstOrNull { it.containsScreenPoint(screenX, screenY) }
+
+    /** Every live window, for lifecycle forwarding and "deactivate the others". */
+    fun browserWindows(): Collection<BrowserWindowView> = browserWindows.values
+
+    /** Drop a window whose pin has gone, so its WebView is not leaked. */
+    fun releaseBrowserWindow(pinId: String) {
+        browserWindows.remove(pinId)?.destroy()
+    }
+
+    /** Container FrameLayout: content + (hidden until modify) ✕ chip. */
+    private fun buildPinView(pin: HudPin): FrameLayout {
+        val container = FrameLayout(activity)
+        val content: View = when (pin.type) {
+            HudPinStore.TYPE_PICTURE -> buildPictureContent(pin)
+            HudPinStore.TYPE_LIVE -> buildLiveContent(pin)
+            HudPinStore.TYPE_COUNTDOWN -> buildCountdownContent(pin)
+            BrowserTool.TYPE_BROWSER -> browserWindowFor(pin)
+            else -> buildNoteContent(pin)
+        }
+        val (w, h) = when (pin.type) {
+            // A browser window carries its own size — it is on a fixed 3:4
+            // ladder the wearer can step through — so the board takes the
+            // window's word for it rather than imposing a box.
+            BrowserTool.TYPE_BROWSER -> (content as BrowserWindowView).let {
+                it.windowWidth to it.windowHeight
+            }
+            // Notes and live cards hug their rendered content. The previous
+            // fixed boxes stretched both the visible background and the
+            // clickable hit target far beyond short text.
+            HudPinStore.TYPE_NOTE -> measureContent(content, dp(NOTE_MAX_WIDTH_DP))
+            HudPinStore.TYPE_PICTURE -> dp(64) to dp(48)
+            HudPinStore.TYPE_LIVE -> measureContent(content, dp(LIVE_MAX_WIDTH_DP))
+            // One line of label + time — deliberately small, a countdown is
+            // glanceable status, not content.
+            HudPinStore.TYPE_COUNTDOWN -> dp(132) to dp(24)
+            else -> dp(92) to dp(46)
+        }
+        container.layoutParams = FrameLayout.LayoutParams(w, h)
+        container.elevation = 6f * density
+        container.isClickable = true
+        container.isFocusable = true
+        container.tag = pin.id
+        // A very short content-sized pin can be narrower than the modify
+        // chip; let that temporary control overhang without enlarging the
+        // pin's normal visual or hit bounds.
+        container.clipChildren = false
+        container.clipToPadding = false
+        content.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        // taps must land on the CONTAINER (the hit-test walks descendants
+        // in reverse; a clickable child would steal the tap from it).
+        content.isClickable = false
+        content.isFocusable = false
+        container.addView(content)
+
+        container.setOnClickListener {
+            if (modifyPinId != null) exitModifyMode() else openPin(pin)
+        }
+        return container
+    }
+
+    /**
+     * Measure a wrap-content surface before it is attached to [board].
+     * render() needs concrete positive dimensions immediately for flow,
+     * collision avoidance, clamping, and move-centering, so leaving the
+     * container itself as WRAP_CONTENT would feed -2 into that geometry.
+     */
+    private fun measureContent(content: View, maxWidthPx: Int): Pair<Int, Int> {
+        content.measure(
+            View.MeasureSpec.makeMeasureSpec(maxWidthPx, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        return content.measuredWidth.coerceAtLeast(1) to
+            content.measuredHeight.coerceAtLeast(1)
+    }
+
+    private fun buildNoteContent(pin: HudPin): View {
+        val tv = TextView(activity)
+        tv.text = pin.payload.ifBlank { pin.label }
+        tv.setTextColor(0xFF1B1B10.toInt())
+        tv.textSize = 10.4f
+        tv.maxLines = 4
+        tv.ellipsize = android.text.TextUtils.TruncateAt.END
+        tv.setPadding(dp(6), dp(5), dp(6), dp(5))
+        // post-it yellow, near-opaque so the dark text survives outdoors
+        tv.background = GradientDrawable().apply {
+            setColor(0xF2FFEE58.toInt())
+            cornerRadius = 2f * density
+        }
+        return tv
+    }
+
+    /**
+     * Live card: dark chip. Header = accent label + last-update age;
+     * body = the engine's latest text. Stale or never-refreshed cards
+     * render dimmed.
+     */
+    private fun buildLiveContent(pin: HudPin): View {
+        val col = LinearLayout(activity)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(7), dp(3), dp(7), dp(4))
+        col.background = GradientDrawable().apply {
+            setColor(0xB3000000.toInt())
+            cornerRadius = 3f * density
+            if (pin.stale) setStroke(dp(1), 0x66FF5252)
+        }
+
+        val header = LinearLayout(activity)
+        header.orientation = LinearLayout.HORIZONTAL
+        header.gravity = Gravity.CENTER_VERTICAL
+        val label = TextView(activity)
+        label.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        label.text = pin.label.uppercase(Locale.US)
+        label.setTextColor(0xFF7FDBFF.toInt())
+        label.textSize = 9.2f
+        label.typeface = Typeface.DEFAULT_BOLD
+        label.maxLines = 1
+        // Cap so a long title still leaves the age beside it (not off-card).
+        label.maxWidth = dp(150)
+        label.ellipsize = android.text.TextUtils.TruncateAt.END
+        header.addView(label)
+        // Beside the title — "WORLD CUP · 5m", or a status reason when the
+        // card isn't updating: red for a dead/stale source, amber for an
+        // informational state like "rate-limited" (throttled, not broken).
+        val trailing = pin.statusNote ?: if (pin.stale) "stale" else ageText(pin.updatedAt)
+        if (trailing.isNotBlank()) {
+            val age = TextView(activity)
+            age.layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = dp(5); leftMargin = dp(5) }
+            age.text = "·  $trailing"
+            age.setTextColor(
+                when {
+                    pin.stale -> 0xFFFF5252.toInt()           // red — dead source
+                    pin.statusNote != null -> 0xFFFFB347.toInt() // amber — throttled/info
+                    else -> 0x80FFFFFF.toInt()                // dim — normal age
+                }
+            )
+            age.textSize = 9.2f
+            header.addView(age)
+        }
+        col.addView(header)
+
+        val body = TextView(activity)
+        // Clearer than a bare "…": a never-loaded card reads "updating…",
+        // and one that's failed enough to be stale reads "unavailable".
+        body.text = pin.content.ifBlank { if (pin.stale) "unavailable" else "updating…" }
+        body.setTextColor(Color.WHITE)
+        body.textSize = 10.4f
+        body.maxLines = LiveCardEngine.MAX_CARD_LINES
+        body.ellipsize = android.text.TextUtils.TruncateAt.END
+        body.setLineSpacing(0f, 1.05f)
+        col.addView(body)
+
+        col.alpha = if (pin.stale || pin.content.isBlank()) 0.72f else 1f
+        return col
+    }
+
+    /**
+     * Countdown chip: same dark translucent slab as a live card, one row —
+     * "drink water · 0:47". The time TextView is registered in
+     * [countdownViews] so the ticker can rewrite it without a re-render.
+     */
+    private fun buildCountdownContent(pin: HudPin): View {
+        val row = LinearLayout(activity)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(dp(7), dp(2), dp(7), dp(2))
+        row.background = GradientDrawable().apply {
+            setColor(0xB3000000.toInt())
+            cornerRadius = 3f * density
+        }
+
+        val label = TextView(activity)
+        label.layoutParams = LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        )
+        label.text = pin.payload.ifBlank { pin.label }
+        label.setTextColor(0xFF7FDBFF.toInt())
+        label.textSize = 9.2f
+        label.typeface = Typeface.DEFAULT_BOLD
+        label.maxLines = 1
+        label.ellipsize = android.text.TextUtils.TruncateAt.END
+        row.addView(label)
+
+        // Separator is its own view so the ticker's text is JUST the clock.
+        val dot = TextView(activity)
+        dot.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = dp(4); leftMargin = dp(4) }
+        dot.text = "·"
+        dot.setTextColor(0x80FFFFFF.toInt())
+        dot.textSize = 9.2f
+        row.addView(dot)
+
+        val time = TextView(activity)
+        time.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = dp(5); leftMargin = dp(5) }
+        time.text = remainingText(pin.dueAtMs, System.currentTimeMillis())
+        time.setTextColor(Color.WHITE)
+        time.textSize = 9.6f
+        time.typeface = Typeface.MONOSPACE // fixed width — digits don't jitter
+        row.addView(time)
+
+        countdownViews[pin.id] = time to pin.dueAtMs
+        return row
+    }
+
+    private fun ageText(updatedAt: Long): String {
+        if (updatedAt <= 0L) return ""
+        val mins = (System.currentTimeMillis() - updatedAt) / 60_000L
+        return when {
+            mins < 1 -> "now"
+            mins < 60 -> "${mins}m"
+            else -> "${mins / 60}h"
+        }
+    }
+
+    private fun buildPictureContent(pin: HudPin): View {
+        val iv = ImageView(activity)
+        iv.scaleType = ImageView.ScaleType.CENTER_CROP
+        iv.background = GradientDrawable().apply {
+            setColor(0xFF10181E.toInt())
+            setStroke(dp(1), 0xCCFFFFFF.toInt())
+            cornerRadius = 2f * density
+        }
+        iv.setPadding(dp(1), dp(1), dp(1), dp(1))
+        loadPinBitmap(pin) { bmp -> iv.setImageBitmap(bmp) }
+        return iv
+    }
+
+    private fun openPin(pin: HudPin) {
+        when (pin.type) {
+            HudPinStore.TYPE_PICTURE -> showFullscreenPicture(pin)
+            HudPinStore.TYPE_LIVE -> {
+                // No browser to open a source page in — tap = refresh now.
+                HudPinStore.requestRefresh(pin.id)
+                showToast("Refreshing \"${pin.label}\"…")
+            }
+            else -> {
+                // Notes are inert surfaces — nothing to open on this build.
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Fullscreen picture viewer (tap anywhere to dismiss)
+    // ------------------------------------------------------------------
+
+    private fun showFullscreenPicture(pin: HudPin) {
+        dismissFullscreen()
+        val overlayRoot = board.parent as? FrameLayout ?: return
+        val frame = FrameLayout(activity)
+        frame.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        frame.setBackgroundColor(0xE6000000.toInt())
+        frame.elevation = 30f * density
+        frame.isClickable = true
+        frame.isFocusable = true
+
+        val iv = ImageView(activity)
+        iv.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ).apply { setMargins(dp(24), dp(20), dp(24), dp(28)) }
+        iv.scaleType = ImageView.ScaleType.FIT_CENTER
+        frame.addView(iv)
+
+        if (pin.label.isNotBlank()) {
+            val caption = TextView(activity)
+            caption.layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply { bottomMargin = dp(6) }
+            caption.text = pin.label
+            caption.setTextColor(Color.WHITE)
+            caption.textSize = 11f
+            caption.setShadowLayer(3f * density, 0f, 1f, Color.BLACK)
+            frame.addView(caption)
+        }
+
+        frame.setOnClickListener { dismissFullscreen() }
+        overlayRoot.addView(frame)
+        fullscreenView = frame
+        forceCursorVisible()
+        loadPinBitmap(pin) { bmp -> iv.setImageBitmap(bmp) }
+    }
+
+    fun dismissFullscreen(): Boolean {
+        val v = fullscreenView ?: return false
+        (v.parent as? FrameLayout)?.removeView(v)
+        fullscreenView = null
+        return true
+    }
+
+    fun isFullscreenShowing(): Boolean = fullscreenView != null
+
+    private fun loadPinBitmap(pin: HudPin, onReady: (Bitmap) -> Unit) {
+        bitmapCache.get(pin.id)?.let { onReady(it); return }
+        Thread {
+            val bmp: Bitmap? = try {
+                val src = pin.payload
+                if (src.startsWith("http://") || src.startsWith("https://")) {
+                    URL(src).openStream().use { BitmapFactory.decodeStream(it) }
+                } else {
+                    val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(src, opts)
+                    val sample = maxOf(1, maxOf(opts.outWidth, opts.outHeight) / 1280)
+                    BitmapFactory.decodeFile(
+                        src, BitmapFactory.Options().apply { inSampleSize = sample }
+                    )
+                }
+            } catch (_: Exception) {
+                null
+            }
+            if (bmp != null) {
+                bitmapCache.put(pin.id, bmp)
+                uiHandler.post { onReady(bmp) }
+            }
+        }.start()
+    }
+
+    // ------------------------------------------------------------------
+    // Hud-modify mode (double-tap with the cursor over a pin)
+    // ------------------------------------------------------------------
+
+    /**
+     * Double-tap hook. Returns true when the tap landed on a pin and
+     * modify mode engaged (caller should consume the gesture and skip
+     * the Gemini-toggle stage). Exiting on a second double-tap is the
+     * caller's branch — it checks [isInModifyMode] first.
+     */
+    fun onDoubleTapAt(screenX: Float, screenY: Float): Boolean {
+        val hit = pinViews.entries.firstOrNull { (_, v) ->
+            viewContains(v, screenX, screenY)
+        } ?: return false
+        enterModifyMode(hit.key)
+        return true
+    }
+
+    private fun enterModifyMode(pinId: String) {
+        if (modifyPinId != null && modifyPinId != pinId) exitModifyMode()
+        val container = pinViews[pinId] ?: return
+        modifyPinId = pinId
+        forceCursorVisible()
+        container.scaleX = 1.08f
+        container.scaleY = 1.08f
+        container.elevation = 12f * density
+
+        // One chip only: ✕ deletes. Moving needs no chip — the NEXT tap
+        // anywhere in the zone places the pin there and the mode exits
+        // immediately.
+        container.addView(buildChip("✕", 0xE6D32F2F.toInt(), Gravity.TOP or Gravity.END) {
+            val id = modifyPinId ?: return@buildChip
+            exitModifyMode()
+            HudPinStore.remove(id)
+            showToast("Pin removed")
+        }.also { it.tag = CHIP_TAG })
+    }
+
+    private fun buildChip(
+        glyph: String,
+        color: Int,
+        gravity: Int,
+        onTap: () -> Unit
+    ): TextView {
+        val chip = TextView(activity)
+        val size = dp(20)
+        chip.layoutParams = FrameLayout.LayoutParams(size, size, gravity)
+        chip.gravity = Gravity.CENTER
+        chip.text = glyph
+        chip.setTextColor(Color.WHITE)
+        chip.textSize = 10f
+        chip.typeface = Typeface.DEFAULT_BOLD
+        chip.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+            setStroke(dp(1), Color.WHITE)
+        }
+        chip.elevation = 14f * density
+        chip.isClickable = true
+        chip.setOnClickListener { onTap() }
+        return chip
+    }
+
+    /**
+     * Consumes the NEXT tap while modify mode is active — called by
+     * MainActivity at the top of the overlay tap dispatch, before the
+     * normal hit-test.
+     *
+     *   • Tap on the ✕ chip → DELETE the pin, exit modify mode.
+     *   • Tap anywhere else → MOVE the pin there (centered on the tap,
+     *     clamped inside the zone), exit modify mode.
+     */
+    fun onOverlayTapWhileModify(screenX: Float, screenY: Float): Boolean {
+        val id = modifyPinId ?: return false
+        val container = pinViews[id] ?: run {
+            exitModifyMode()
+            return false
+        }
+        val chip = (0 until container.childCount)
+            .map { container.getChildAt(it) }
+            .firstOrNull { it.tag == CHIP_TAG }
+        if (chip != null && viewContains(chip, screenX, screenY, slackPx = dp(6))) {
+            exitModifyMode()
+            HudPinStore.remove(id)
+            showToast("Pin removed")
+            return true
+        }
+        val boardLoc = IntArray(2)
+        board.getLocationOnScreen(boardLoc)
+        val w = container.width.takeIf { it > 0 } ?: container.layoutParams.width
+        val h = container.height.takeIf { it > 0 } ?: container.layoutParams.height
+        val lp = container.layoutParams as FrameLayout.LayoutParams
+        lp.leftMargin = (screenX - boardLoc[0] - w / 2f).toInt()
+        lp.topMargin = (screenY - boardLoc[1] - h / 2f).toInt()
+        clampToZone(lp, w, h, lastZone ?: computeZone())
+        container.layoutParams = lp
+        exitModifyMode()
+        // persists + re-renders through the store observer
+        HudPinStore.updatePosition(id, lp.leftMargin, lp.topMargin)
+        return true
+    }
+
+    fun isInModifyMode(): Boolean = modifyPinId != null
+
+    fun exitModifyMode() {
+        val container = pinViews[modifyPinId] ?: run {
+            modifyPinId = null
+            return
+        }
+        modifyPinId = null
+        container.scaleX = 1f
+        container.scaleY = 1f
+        container.elevation = 6f * density
+        removeChips(container)
+    }
+
+    private fun removeChips(container: FrameLayout) {
+        val chips = (0 until container.childCount)
+            .map { container.getChildAt(it) }
+            .filter { it.tag == CHIP_TAG }
+        chips.forEach { container.removeView(it) }
+    }
+
+    private fun viewContains(v: View, screenX: Float, screenY: Float, slackPx: Int = 0): Boolean {
+        if (v.visibility != View.VISIBLE || v.width == 0) return false
+        val loc = IntArray(2)
+        v.getLocationOnScreen(loc)
+        return screenX >= loc[0] - slackPx && screenX < loc[0] + v.width + slackPx &&
+            screenY >= loc[1] - slackPx && screenY < loc[1] + v.height + slackPx
+    }
+
+    companion object {
+        private const val CHIP_TAG = "hud_pin_chip"
+
+        // Content-sized notes/live cards retain their former widths as caps.
+        private const val NOTE_MAX_WIDTH_DP = 100
+        private const val LIVE_MAX_WIDTH_DP = 240
+
+        /**
+         * The under-HUD content zone in the overlay's LOGICAL 640×480
+         * coordinate space. Top = 44 (2px margin + 36px HUD strip + gap),
+         * matching the top line of TapInsight's calibrated shelf; the
+         * rest of the viewport belongs to pins / camera preview. Raw px
+         * on purpose — the calibration space is overlay units, not dp.
+         */
+        val UNDER_HUD_ZONE = android.graphics.Rect(6, 44, 634, 474)
+    }
+}

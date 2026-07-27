@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Foreground service permissions for GeminiSessionForegroundService.
+         FOREGROUND_SERVICE_MICROPHONE / _CAMERA are the Android 14+
+         typed flavours; the X3 Pro is Android 12 but targetSdk 35 keeps
+         them declared for correctness. POST_NOTIFICATIONS is requested
+         at runtime in MainActivity.onCreate. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Reminders: exact alarms (Android 12+ special permission — granted by
+         default on the X3's Android 12; setWindow fallback if revoked) and
+         boot re-registration, since alarms don't survive reboots. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="true" />
+
+    <application
+        android:name=".X3HubApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.X3Hub"
+        tools:targetApi="31">
+
+        <!-- Required for the RayNeo launcher to list the app. -->
+        <meta-data
+            android:name="com.rayneo.mercury.app"
+            android:value="true" />
+
+        <!-- NO ar_mode meta-data: ar_mode restricts rendering to the
+             left lens only (TapInsight gotcha #3). -->
+
+        <!-- Split intent-filters (MAIN+LAUNCHER, MAIN+AR_APP) — the
+             combined single-filter form was never proven to launch on
+             device; the split form is (TapBubbles addendum). -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="density|orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation"
+            android:exported="true"
+            android:hardwareAccelerated="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape"
+            android:windowSoftInputMode="adjustNothing"
+            android:theme="@style/Theme.X3Hub">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.rayneo.intent.category.AR_APP" />
+            </intent-filter>
+        </activity>
+
+        <!-- Foreground service that keeps the Gemini Live AudioRecord
+             and CameraX alive. Type=microphone|camera is mandatory on
+             Android 14+; harmless on the X3's Android 12. -->
+        <service
+            android:name=".core.session.GeminiSessionForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|camera" />
+
+        <!-- adb-pushable API key (broadcast with an "es" string extra
+             named "key") — exact commands in README.md. -->
+        <receiver
+            android:name=".core.config.ApiKeyBroadcastReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.x3hub.app.SET_API_KEY" />
+            </intent-filter>
+        </receiver>
+
+        <!-- adb path for long custom-instruction text (voice handles short
+             ones); exact command in README.md (SET_INSTRUCTIONS with an
+             "es" string extra named "text"). -->
+        <receiver
+            android:name=".core.config.InstructionsBroadcastReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.x3hub.app.SET_INSTRUCTIONS" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Reminder alarm fire + boot/update re-registration. exported=false:
+             AlarmManager targets it explicitly and protected system broadcasts
+             (BOOT_COMPLETED) are delivered regardless. -->
+        <receiver
+            android:name=".core.reminders.ReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>
