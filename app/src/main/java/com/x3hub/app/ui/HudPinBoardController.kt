@@ -10,6 +10,7 @@ import android.os.Handler
 import android.util.LruCache
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -146,6 +147,13 @@ class HudPinBoardController(
 
     private fun render(pins: List<HudPin>) {
         pinsSnapshot = pins
+        // The highlight and chip belong to view instances that are about to
+        // be destroyed, so modify mode has to come down here — but a resize
+        // re-renders the board *underneath* a wearer who is still editing,
+        // and dropping the mode there means their next swipe is no longer a
+        // resize. It falls through to the dim pull instead and blacks the
+        // display out mid-edit. So the mode is re-entered on the new views.
+        val resumeModifyPinId = modifyPinId
         exitModifyMode()
         board.removeAllViews()
         pinViews.clear()
@@ -227,6 +235,9 @@ class HudPinBoardController(
             board.addView(container)
             pinViews[pin.id] = container
         }
+        if (resumeModifyPinId != null && pinViews.containsKey(resumeModifyPinId)) {
+            enterModifyMode(resumeModifyPinId)
+        }
         syncTicker()
     }
 
@@ -283,6 +294,10 @@ class HudPinBoardController(
         browserWindows.getOrPut(pin.id) {
             BrowserWindowView(activity).also { w ->
                 w.onExitRequested = { forceCursorVisible() }
+                w.maxSizeProvider = {
+                    val z = computeZone()
+                    Pair(z.right - z.left, z.bottom - z.top)
+                }
                 if (pin.payload.isNotBlank()) w.loadUrl(pin.payload)
             }
         }
@@ -344,6 +359,11 @@ class HudPinBoardController(
         // in reverse; a clickable child would steal the tap from it).
         content.isClickable = false
         content.isFocusable = false
+        // Browser windows are the one content view we reuse across renders
+        // (a WebView holds page state that must survive a re-layout), so it
+        // arrives still attached to the container built last time. Every
+        // other pin type builds fresh and has no parent.
+        (content.parent as? ViewGroup)?.removeView(content)
         container.addView(content)
 
         container.setOnClickListener {

@@ -38,6 +38,9 @@ import com.x3hub.app.core.bridge.CameraStateBridge
 import com.x3hub.app.core.bridge.ChatCardBridge
 import com.x3hub.app.core.bridge.HudStateBridge
 import com.x3hub.app.core.bridge.VoiceServiceApi
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.DimController
 import com.x3hub.app.ui.HubSettingsOverlay
@@ -200,6 +203,57 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /**
+     * Debug-only door to the browser tool, so a window can be opened without
+     * speaking to the assistant:
+     *
+     *   adb shell am broadcast -a com.x3hub.app.DEBUG_OPEN_BROWSER \
+     *       -e url https://example.com -p com.x3hub.app
+     *
+     * Voice is the real path, but it cannot be driven over adb — which means
+     * without this, every test of the window, its activation, its resize and
+     * its exit would need someone wearing the glasses and talking. Registered
+     * only in debug builds so it is not an input into the shipped app.
+     */
+    private var debugBrowserReceiver: BroadcastReceiver? = null
+
+    private fun registerDebugBrowserReceiver() {
+        if (!BuildConfig.DEBUG) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                // `-e at window` parks the cursor on the first browser
+                // window instead of a screen coordinate. The pin board flows
+                // pins around whatever else is on the HUD, so a window's
+                // position is not knowable from outside — an assistant card
+                // appearing is enough to move it — and a test that aims at a
+                // fixed point silently starts clicking empty space.
+                intent?.getStringExtra("cursor")?.let { spec ->
+                    placeCursorForDebug(spec)
+                    return
+                }
+                val url = intent?.getStringExtra("url")
+                val query = intent?.getStringExtra("query")
+                Log.i(TAG, "DEBUG_OPEN_BROWSER url=$url query=$query")
+                lifecycleScope.launch {
+                    val args = buildMap {
+                        if (!url.isNullOrBlank()) put("url", url)
+                        if (!query.isNullOrBlank()) put("query", query)
+                    }
+                    val result = BrowserTool(applicationContext).execute(args)
+                    Log.i(TAG, "DEBUG_OPEN_BROWSER -> ${result.getOrElse { "failed: ${it.message}" }}")
+                }
+            }
+        }
+        debugBrowserReceiver = receiver
+        val filter = IntentFilter("com.x3hub.app.DEBUG_OPEN_BROWSER")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
+    }
+
     override fun onPause() {
         super.onPause()
         // Pause each page individually. WebView.pauseTimers() would be the
@@ -219,6 +273,8 @@ class MainActivity : AppCompatActivity() {
         hudPinBoardController?.browserWindows()?.forEach { it.destroy() }
         modifyingWindow = null
         uiHandler.removeCallbacksAndMessages(null)
+        runCatching { debugBrowserReceiver?.let { unregisterReceiver(it) } }
+        debugBrowserReceiver = null
         runCatching { batteryReceiver?.let { unregisterReceiver(it) } }
         batteryReceiver = null
         runCatching {
@@ -637,6 +693,7 @@ class MainActivity : AppCompatActivity() {
         hudPinBoardController = controller
         controller.start()
         setupHubOverlays()
+        registerDebugBrowserReceiver()
     }
 
     /**
@@ -750,7 +807,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Right trackpad (cyttsp5_mt) — cursor movement + touch-tap clicks.
-        if (deviceName.contains("cyttsp5", ignoreCase = true)) {
+        // In debug builds `adb shell input` events (device name "Virtual")
+        // are accepted too, so the whole gesture set can be driven from a
+        // host machine without a hand on the temple.
+        if (deviceName.contains("cyttsp5", ignoreCase = true) ||
+            (BuildConfig.DEBUG && deviceName.contains("Virtual", ignoreCase = true))
+        ) {
             handleTrackpadCursorTouch(ev)
             return true
         }
@@ -847,6 +909,14 @@ class MainActivity : AppCompatActivity() {
                     droppedFirstDelta = true
                     return
                 }
+                // Inside an ACTIVE window the page owns the gestures. The
+                // cursor deliberately stops wandering there — it would only
+                // be a second thing moving on top of a page that is already
+                // scrolling — and the slide becomes the page's drag instead.
+                if (activeWindowOwnsGestures()) {
+                    if (rightArmTouchMoved) forwardDragToActiveWindow(dx, dy)
+                    return
+                }
                 moveCursorBy(dx * cursorGain, dy * cursorGain)
             }
             MotionEvent.ACTION_UP -> {
@@ -855,6 +925,9 @@ class MainActivity : AppCompatActivity() {
                 rightArmTouchTracking = false
                 if (!tracking) return
                 if (moved) {
+                    // A drag that went to the page ends there; it is not also
+                    // a candidate for the dim pull.
+                    if (finishWindowDrag(cancelled = false)) return
                     maybeHandleEdgePull(ev)
                     return
                 }
@@ -865,12 +938,81 @@ class MainActivity : AppCompatActivity() {
             }
             MotionEvent.ACTION_CANCEL -> {
                 rightArmTouchTracking = false
+                finishWindowDrag(cancelled = true)
             }
         }
     }
 
     private var lastTrackpadX = 0f
     private var lastTrackpadY = 0f
+
+    // ── Page drag (scrolling inside an active window) ────────────────
+    private var draggingWindow: BrowserWindowView? = null
+    private var dragLocalX = 0f
+    private var dragLocalY = 0f
+    private var dragDownTimeMs = 0L
+
+    /**
+     * True while a window has the input and is not being moved/resized.
+     * Modify mode is excluded because there the sideways swipe is the
+     * resize gesture, and both cannot claim the same slide.
+     */
+    private fun activeWindowOwnsGestures(): Boolean {
+        val c = hudPinBoardController ?: return false
+        if (c.isInModifyMode()) return false
+        return c.browserWindows().any { it.isActive }
+    }
+
+    /**
+     * Turn trackpad deltas into a touch drag on the page. Forwarding is 1:1
+     * so the page behaves exactly like a phone under a finger — a scroll of
+     * n pad units is n page px, and flings/overscroll come free from the
+     * WebView rather than being re-simulated here.
+     *
+     * Nothing is forwarded until the touch has already disqualified itself
+     * as a tap, so clicks still take the untouched tap path.
+     */
+    private fun forwardDragToActiveWindow(dx: Float, dy: Float) {
+        val window = draggingWindow ?: run {
+            val w = hudPinBoardController?.browserWindows()
+                ?.firstOrNull { it.isActive } ?: return
+            val origin = IntArray(2)
+            w.getLocationOnScreen(origin)
+            val pt = cursorInteractionPoint()
+            dragLocalX = pt.first - origin[0]
+            dragLocalY = pt.second - origin[1]
+            dragDownTimeMs = SystemClock.uptimeMillis()
+            draggingWindow = w
+            sendDragEvent(w, MotionEvent.ACTION_DOWN)
+            w
+        }
+        dragLocalX += dx
+        dragLocalY += dy
+        sendDragEvent(window, MotionEvent.ACTION_MOVE)
+    }
+
+    /** Close an in-flight page drag. Returns true if there was one. */
+    private fun finishWindowDrag(cancelled: Boolean): Boolean {
+        val w = draggingWindow ?: return false
+        draggingWindow = null
+        sendDragEvent(
+            w,
+            if (cancelled) MotionEvent.ACTION_CANCEL else MotionEvent.ACTION_UP
+        )
+        return true
+    }
+
+    private fun sendDragEvent(w: BrowserWindowView, action: Int) {
+        val ev = MotionEvent.obtain(
+            dragDownTimeMs, SystemClock.uptimeMillis(),
+            action, dragLocalX, dragLocalY, 0
+        )
+        try {
+            w.forwardTouch(ev)
+        } finally {
+            ev.recycle()
+        }
+    }
 
     /**
      * Pull right to dim, pull left to come back.
@@ -943,6 +1085,28 @@ class MainActivity : AppCompatActivity() {
         cursorY = (cursorY + dy).coerceIn(0f, maxH - 1f)
         setCursorVisible(true)
         updateCursorView()
+    }
+
+    /** Debug cursor placement: "window" or "x,y" in logical px. */
+    private fun placeCursorForDebug(spec: String) {
+        if (spec == "window") {
+            val w = hudPinBoardController?.browserWindows()?.firstOrNull()
+            if (w == null) {
+                Log.i(TAG, "DEBUG cursor=window — no browser window")
+                return
+            }
+            val origin = IntArray(2)
+            w.getLocationOnScreen(origin)
+            cursorX = origin[0] + w.width / 2f
+            cursorY = origin[1] + w.height / 2f
+        } else {
+            val parts = spec.split(",")
+            cursorX = parts.getOrNull(0)?.trim()?.toFloatOrNull() ?: return
+            cursorY = parts.getOrNull(1)?.trim()?.toFloatOrNull() ?: return
+        }
+        setCursorVisible(true)
+        updateCursorView()
+        Log.i(TAG, "DEBUG cursor -> ($cursorX, $cursorY)")
     }
 
     private fun updateCursorView() {

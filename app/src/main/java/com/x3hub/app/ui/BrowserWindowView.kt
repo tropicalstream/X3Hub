@@ -8,6 +8,7 @@ import android.os.Build
 import android.util.AttributeSet
 import android.util.Log
 import android.view.Gravity
+import com.x3hub.app.BuildConfig
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.InputMethodManager
@@ -120,6 +121,17 @@ class BrowserWindowView @JvmOverloads constructor(
      * to resize that container, and this is how it learns to.
      */
     var onWindowSizeChanged: ((width: Int, height: Int) -> Unit)? = null
+
+    /**
+     * The largest (width, height) this window may grow to, in logical px.
+     * The host supplies it because only the host knows the board's free
+     * zone; without it the ladder can only be measured against the pin
+     * container, which is always exactly the window's current size.
+     */
+    var maxSizeProvider: (() -> Pair<Int, Int>)? = null
+
+    /** Scroll offset in CSS px, held across a resize reload. */
+    private var pendingScrollCssY: Int? = null
 
     /**
      * Ad/tracker filter hook, called on the network thread for every
@@ -298,6 +310,13 @@ class BrowserWindowView @JvmOverloads constructor(
                 // parse finds the shims, and at finish for anything the
                 // document replaced in between.
                 injectPolyfills()
+                restoreScrollAfterResize()
+                if (BuildConfig.DEBUG) {
+                    view?.evaluateJavascript(
+                        "JSON.stringify({iw:innerWidth,sw:document.documentElement.scrollWidth," +
+                            "dpr:devicePixelRatio,vs:(visualViewport?visualViewport.scale:-1)})"
+                    ) { Log.i(TAG, "viewport $it (view=${width}x$height)") }
+                }
                 runCatching { CookieManager.getInstance().flush() }
             }
         }
@@ -439,9 +458,13 @@ class BrowserWindowView @JvmOverloads constructor(
      * container than the whole zone.
      */
     private fun largestStepThatFits(requested: Int): Int {
-        val host = parent as? View ?: return requested
-        val maxW = host.width
-        val maxH = host.height
+        // Deliberately NOT `parent`: the host builds a container sized to the
+        // window's *current* size, so measuring against it would mean the
+        // window only ever "fits" the size it already is — every grow step
+        // would silently no-op. [maxSizeProvider] is the board's free zone.
+        val bounds = maxSizeProvider?.invoke()
+        val maxW = bounds?.first ?: (parent as? View)?.width ?: return requested
+        val maxH = bounds?.second ?: (parent as? View)?.height ?: return requested
         if (maxW <= 0 || maxH <= 0) return requested
         var i = requested
         while (i > 0 && (SIZE_LADDER[i][0] > maxW || SIZE_LADDER[i][1] > maxH)) i--
@@ -460,6 +483,7 @@ class BrowserWindowView @JvmOverloads constructor(
             }
         }
         applyPageScale(w)
+        reloadAtNewScale()
         Log.i(TAG, "resize → step $step (${w}x$h), page scale ${pageScalePercent(w)}%")
         onWindowSizeChanged?.invoke(w, h)
     }
@@ -507,6 +531,41 @@ class BrowserWindowView @JvmOverloads constructor(
      */
     private fun applyPageScale(widthPx: Int) {
         webView.setInitialScale(pageScalePercent(widthPx))
+    }
+
+    /**
+     * Re-render the current page at a newly applied scale.
+     *
+     * The engine adopts an initial scale at navigation time and not before,
+     * so a resized window keeps the scale it loaded at while its viewport
+     * has changed underneath it — which is what makes lines run off the
+     * right edge instead of re-wrapping. A reload is the mechanism that
+     * actually exists for this.
+     *
+     * The cost of a reload is losing the wearer's place, so the scroll
+     * offset is carried across. It is read in CSS px, which is
+     * scale-independent by definition, so the same offset means the same
+     * paragraph at 40% and at 100%.
+     */
+    private fun reloadAtNewScale() {
+        val wv = webView
+        if (wv.url.isNullOrBlank()) return
+        val url = wv.url ?: return
+        wv.evaluateJavascript("(window.scrollY|0)") { value ->
+            pendingScrollCssY = value?.trim()?.toFloatOrNull()?.toInt()
+            // loadUrl, NOT reload: a reload restores the page's previous
+            // zoom state and the new initial scale is ignored, which is
+            // exactly the bug this exists to fix. A fresh navigation is
+            // what makes the engine adopt it.
+            wv.loadUrl(url)
+        }
+    }
+
+    private fun restoreScrollAfterResize() {
+        val y = pendingScrollCssY ?: return
+        pendingScrollCssY = null
+        if (y <= 0) return
+        webView.evaluateJavascript("window.scrollTo(0,$y)", null)
     }
 
     private fun pageScalePercent(widthPx: Int): Int =
