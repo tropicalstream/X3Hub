@@ -43,7 +43,9 @@ import kotlinx.coroutines.launch
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.DimController
+import com.x3hub.app.core.agent.AgentSpeech
 import com.x3hub.app.core.agent.AgentTaskBridge
+import com.x3hub.app.core.agent.AgentVoice
 import com.x3hub.app.core.web.AdBlock
 import com.x3hub.app.core.agent.PageAgentController
 import com.x3hub.app.ui.HubSettingsOverlay
@@ -118,6 +120,69 @@ class MainActivity : AppCompatActivity() {
      * fetches — belongs to a document, and each window has its own.
      */
     private val pageAgents = HashMap<BrowserWindowView, PageAgentController>()
+
+    // ── Spoken task capture for the page agent ───────────────────────
+    private val agentRecorder by lazy { AgentVoice.Recorder(applicationContext) }
+    private var agentTaskWindow: BrowserWindowView? = null
+    private var geminiWasLiveBeforeTask = false
+    private val autoStopAgentTask = Runnable { finishAgentTask() }
+
+    /**
+     * Open the mic for a page-agent task.
+     *
+     * The Gemini Live session holds an AudioRecord for as long as it is up,
+     * and MediaRecorder cannot have the mic at the same time — so the
+     * session is stood down for the capture and the wearer is told why it
+     * went quiet. SmartView never had to share the microphone with anything.
+     */
+    private fun startAgentTask(window: BrowserWindowView) {
+        if (!AgentVoice.hasKey(applicationContext)) {
+            showNotice("No Groq key for speech — triple-tap for settings.")
+            return
+        }
+        geminiWasLiveBeforeTask =
+            HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE
+        if (geminiWasLiveBeforeTask) exitGeminiFully()
+        AgentSpeech.stop()
+        // The mic does not free instantly after the session lets go.
+        uiHandler.postDelayed({
+            if (!agentRecorder.start()) {
+                showNotice("Microphone unavailable.")
+                return@postDelayed
+            }
+            agentTaskWindow = window
+            if (!window.isActive) {
+                hudPinBoardController?.browserWindows()?.forEach {
+                    if (it !== window) it.deactivate()
+                }
+                window.activate()
+            }
+            showNotice("Listening — double-tap again when you're done.")
+            uiHandler.removeCallbacks(autoStopAgentTask)
+            uiHandler.postDelayed(autoStopAgentTask, AgentVoice.MAX_RECORD_MS)
+        }, if (geminiWasLiveBeforeTask) 450L else 0L)
+    }
+
+    /** Second double-tap (or the auto-stop): transcribe and dispatch. */
+    private fun finishAgentTask() {
+        uiHandler.removeCallbacks(autoStopAgentTask)
+        val window = agentTaskWindow
+        agentTaskWindow = null
+        val audio = agentRecorder.stop()
+        if (audio == null || window == null) {
+            showNotice("Didn't catch that.")
+            return
+        }
+        showNotice("Transcribing…")
+        AgentVoice.transcribe(applicationContext, audio) { text, error ->
+            if (text == null) {
+                showNotice(error ?: "Didn't catch that.")
+                return@transcribe
+            }
+            showNotice("Agent: ${text.take(46)}")
+            agentFor(window).run(text)
+        }
+    }
 
     private fun agentFor(window: BrowserWindowView): PageAgentController =
         pageAgents.getOrPut(window) {
@@ -252,6 +317,17 @@ class MainActivity : AppCompatActivity() {
                 intent?.getStringExtra("zoom")?.toFloatOrNull()?.let { f ->
                     hudPinBoardController?.browserWindows()?.firstOrNull()
                         ?.debugZoomBy(f)
+                    return
+                }
+                intent?.getStringExtra("task")?.let { t ->
+                    // Exercises the dispatch half without a microphone: the
+                    // capture half needs real speech in the room, which a
+                    // scripted run cannot produce.
+                    val w = hudPinBoardController?.browserWindows()
+                        ?.firstOrNull { it.isActive }
+                        ?: hudPinBoardController?.browserWindows()?.firstOrNull()
+                    Log.i(TAG, "DEBUG task window=${w != null}: $t")
+                    if (w == null) showNotice("No window open.") else agentFor(w).run(t)
                     return
                 }
                 if (intent?.getStringExtra("adblock") != null) {
@@ -1490,8 +1566,12 @@ class MainActivity : AppCompatActivity() {
             }
             val window = controller.browserWindowAt(pt.first, pt.second)
             if (window != null) {
-                Log.i(TAG, "Double-tap on a window — page agent")
-                agentFor(window).run(DEFAULT_AGENT_TASK)
+                // SmartView's flow, and the thing that makes the agent an
+                // agent: the first double-tap OPENS THE MIC, the second ends
+                // the recording and hands whatever was said to this window's
+                // agent. A hard-coded task can only ever say what is on a
+                // page; a spoken one can say "open the reviews".
+                if (agentRecorder.isRecording) finishAgentTask() else startAgentTask(window)
                 return
             }
         }
