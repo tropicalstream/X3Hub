@@ -126,6 +126,8 @@ class MainActivity : AppCompatActivity() {
     private var modifyingWindow: BrowserWindowView? = null
     private var lastRightArmTapUpAcceptedMs: Long = 0L
     private var lastRightArmTapSource: TapSource? = null
+    private var cursorAtTouchDownX = 0f
+    private var cursorAtTouchDownY = 0f
 
     // Right-arm TOUCH tap detection (cyttsp5 down+up with little movement).
     private var rightArmTouchDownMs: Long = 0L
@@ -741,6 +743,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         hudPinBoardController?.onBrowserWindowCreated = { w -> agentFor(w) }
+        hudPinBoardController?.onBrowserWindowReleased = { w ->
+            // The agent controller holds the window and a watchdog Runnable;
+            // dropping the map entry without destroy() would keep both alive.
+            pageAgents.remove(w)?.destroy()
+            if (modifyingWindow === w) modifyingWindow = null
+            if (draggingWindow === w) draggingWindow = null
+        }
 
         hubSettingsOverlay = HubSettingsOverlay(
             activity = this,
@@ -910,6 +919,13 @@ class MainActivity : AppCompatActivity() {
                 rightArmTouchDownY = ev.y
                 rightArmTouchMoved = false
                 rightArmTouchTracking = true
+                // Where the cursor was when the finger LANDED. The resize
+                // gate must use this, not the live position: the swipe itself
+                // moves the cursor (gain 0.45 over a full pull is ~220px), so
+                // judging at ACTION_UP finds the cursor already dragged off
+                // the very window the wearer started the swipe on.
+                cursorAtTouchDownX = cursorX
+                cursorAtTouchDownY = cursorY
                 // Deliberately NOT cancelling the pending click here: the
                 // finger going down again is how a double-tap BEGINS, and
                 // clearing the streak on it means the pair can never form.
@@ -1071,6 +1087,10 @@ class MainActivity : AppCompatActivity() {
         // stays available the instant modify ends.
         val resizing = modifyingWindow
         if (resizing != null && hudPinBoardController?.isInModifyMode() == true) {
+            // Only when the swipe STARTED with the cursor on the window
+            // (Mars's rule). Judged at finger-down because the swipe itself
+            // carries the cursor a few hundred px sideways.
+            if (!resizing.containsScreenPoint(cursorAtTouchDownX, cursorAtTouchDownY)) return
             if (kotlin.math.abs(dx) > RESIZE_SWIPE_MIN_PX &&
                 kotlin.math.abs(dx) > kotlin.math.abs(dy) * EDGE_PULL_STRAIGHTNESS
             ) {
@@ -1458,6 +1478,26 @@ class MainActivity : AppCompatActivity() {
         // tap at all — otherwise pressing a settings card silently activates
         // the window sitting beneath it and the panel appears dead. This is
         // the ONLY way to enter a key on-device, so it has to win.
+        // …and modify mode outranks BOTH. The board consumes the next tap to
+        // delete (✕ chip) or move the pin — but a browser pin in MODIFY is by
+        // definition not ACTIVE, so the window branch below read every tap on
+        // it as "activate me" and the delete chip was unreachable: windows
+        // could never be closed. The board's claim has to be tested first.
+        hudPinBoardController?.let { c ->
+            if (c.isInModifyMode()) {
+                val consumed = c.onOverlayTapWhileModify(pt.first, pt.second)
+                // Whatever happened — delete, move, or a stale-view bailout —
+                // the board has left modify mode; the window flags must not
+                // outlive it, or the next swipe resizes a window that no
+                // longer shows any modify border.
+                if (!c.isInModifyMode()) {
+                    c.browserWindows().forEach { it.setModify(false) }
+                    modifyingWindow = null
+                }
+                if (consumed) return
+            }
+        }
+
         val modalUp = hubSettingsOverlay?.isShowing == true
         val window = if (modalUp) null else
             hudPinBoardController?.browserWindowAt(pt.first, pt.second)
@@ -1629,7 +1669,11 @@ class MainActivity : AppCompatActivity() {
          * multi-tapping, so it is generous. A single window for both made a
          * comfortable triple resolve as a double.
          */
-        private const val DOUBLE_TAP_WINDOW_MS = 200L
+        // 200 was tried first per the audit and failed live: a real pair
+        // measured 210ms UP-to-UP and shattered into two singles, one of
+        // which clicked the page. 240 keeps the latency win (was 320) with
+        // margin for a casual rhythm.
+        private const val DOUBLE_TAP_WINDOW_MS = 240L
         private const val TRIPLE_TAP_WINDOW_MS = 400L
 
         private const val LEFT_ARM_TAP_MOVE_TOLERANCE_PX = 60f

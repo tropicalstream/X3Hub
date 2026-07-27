@@ -301,8 +301,25 @@ class PageAgentController(
               ].join(' ') }
             });
             // The panel is built for a phone-sized viewport and would cover
-            // this window entirely. Status goes to the HUD instead.
-            try{ if(window.pageAgent.panel && window.pageAgent.panel.hide) window.pageAgent.panel.hide(); }catch(e){}
+            // this window entirely. Status goes to the HUD instead. Hiding it
+            // once is NOT enough — execute() re-shows it on every task, so the
+            // "Task completed / Enter new task" card was left sitting in the
+            // window after each run. Neutering show() keeps it gone for good.
+            try{
+              if (window.pageAgent.panel){
+                if (window.pageAgent.panel.hide) window.pageAgent.panel.hide();
+                window.pageAgent.panel.show = function(){};
+              }
+            }catch(e){}
+            // Belt and braces: the bundle may rebuild its DOM between steps,
+            // so any panel element that appears anyway is removed.
+            window.__x3HidePanel = function(){
+              try{ if(window.pageAgent && window.pageAgent.panel){ window.pageAgent.panel.hide(); window.pageAgent.panel.show = function(){}; } }catch(e){}
+              try{
+                var els = document.querySelectorAll('[class*="page-agent" i], [id*="page-agent" i], page-agent');
+                for (var i=0;i<els.length;i++){ els[i].style.display='none'; }
+              }catch(e){}
+            };
 
             // ask_user has no answer path here — the mic belongs to the Gemini
             // session. Surface the question and refuse, rather than leaving the
@@ -323,7 +340,9 @@ class PageAgentController(
                 var st = '';
                 try{ st = window.pageAgent.status || ''; }catch(e){}
                 if (st === 'running'){ $BRIDGE.onAgentBusy(String(task)); return; }
+                setTimeout(window.__x3HidePanel, 50);
                 Promise.resolve(window.pageAgent.execute(task)).then(function(res){
+                  setTimeout(window.__x3HidePanel, 0);
                   // execute() RESOLVES for LLM errors, step-limit exhaustion
                   // and user abort — only disposal/duplicate/empty reject. So
                   // success has to be read off the result, not inferred from
@@ -333,6 +352,7 @@ class PageAgentController(
                   if (ok) $BRIDGE.onAgentDone(String(msg || 'Done.'));
                   else $BRIDGE.onAgentError(String(msg || 'Task did not complete.'));
                 }).catch(function(e){
+                  setTimeout(window.__x3HidePanel, 0);
                   $BRIDGE.onAgentError(String((e && e.message) || e));
                 });
               }catch(e){ $BRIDGE.onAgentError(String((e && e.message) || e)); }

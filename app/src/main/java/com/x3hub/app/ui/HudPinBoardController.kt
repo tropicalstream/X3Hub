@@ -157,6 +157,18 @@ class HudPinBoardController(
         exitModifyMode()
         board.removeAllViews()
         pinViews.clear()
+        // Windows whose pin is gone die HERE, not lazily: each one is a live
+        // WebView (renderer process, JS heap) plus a page-agent controller in
+        // the host, and nothing else ever walks this cache again. Before this
+        // sweep, releaseBrowserWindow had no caller at all — a deleted pin
+        // left its WebView running invisibly forever.
+        val liveIds = pins.mapTo(HashSet()) { it.id }
+        val dead = browserWindows.keys.filter { it !in liveIds }
+        for (id in dead) {
+            val w = browserWindows.remove(id) ?: continue
+            onBrowserWindowReleased?.invoke(w)
+            w.destroy()
+        }
         // The views the ticker writes into are about to be discarded.
         countdownViews.clear()
         if (pins.isEmpty()) {
@@ -311,6 +323,9 @@ class HudPinBoardController(
 
     /** Called once per new window, before its first load. */
     var onBrowserWindowCreated: ((BrowserWindowView) -> Unit)? = null
+
+    /** Called as a window's pin is deleted, before the WebView is destroyed. */
+    var onBrowserWindowReleased: ((BrowserWindowView) -> Unit)? = null
 
     /** The window under a screen point, if any — for click/gesture routing. */
     fun browserWindowAt(screenX: Float, screenY: Float): BrowserWindowView? =
