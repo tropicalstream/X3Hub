@@ -133,6 +133,34 @@ class BrowserWindowView @JvmOverloads constructor(
     /** Scroll offset in CSS px, held across a resize reload. */
     private var pendingScrollCssY: Int? = null
 
+    /** Last engine scale reported by onScaleChanged; 0 until the first page. */
+    var currentScale: Float = 0f
+        private set
+
+    /**
+     * Probe: apply an immediate engine zoom and report what the page sees.
+     * Exists to settle whether visionOS-style "content scales with the
+     * window" can be had without the re-navigation that resize does today.
+     */
+    /** Probe: run arbitrary JS in the page and log the result. */
+    fun debugEval(js: String) {
+        webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
+    }
+
+    fun debugZoomBy(factor: Float) {
+        Log.i(TAG, "debugZoomBy($factor) from scale=$currentScale " +
+            "supportZoom=${webView.settings.supportZoom()} " +
+            "builtIn=${webView.settings.builtInZoomControls}")
+        webView.zoomBy(factor)
+        postDelayed({
+            webView.evaluateJavascript(
+                "JSON.stringify({iw:innerWidth,sw:document.documentElement.scrollWidth," +
+                    "vs:(visualViewport?visualViewport.scale:-1)," +
+                    "vw:(visualViewport?Math.round(visualViewport.width):-1)})"
+            ) { Log.i(TAG, "afterZoom $it (view=${width}x$height scale=$currentScale)") }
+        }, 700)
+    }
+
     /**
      * Ad/tracker filter hook, called on the network thread for every
      * subresource. Return a stub response to block, null to allow.
@@ -302,6 +330,12 @@ class BrowserWindowView @JvmOverloads constructor(
             ) {
                 super.onPageStarted(view, url, favicon)
                 injectPolyfills()
+            }
+
+            override fun onScaleChanged(view: WebView?, oldScale: Float, newScale: Float) {
+                super.onScaleChanged(view, oldScale, newScale)
+                currentScale = newScale
+                if (BuildConfig.DEBUG) Log.i(TAG, "scale $oldScale -> $newScale")
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {

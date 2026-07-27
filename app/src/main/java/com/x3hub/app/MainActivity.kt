@@ -231,6 +231,16 @@ class MainActivity : AppCompatActivity() {
                     placeCursorForDebug(spec)
                     return
                 }
+                intent?.getStringExtra("zoom")?.toFloatOrNull()?.let { f ->
+                    hudPinBoardController?.browserWindows()?.firstOrNull()
+                        ?.debugZoomBy(f)
+                    return
+                }
+                intent?.getStringExtra("js")?.let { js ->
+                    hudPinBoardController?.browserWindows()?.firstOrNull()
+                        ?.debugEval(js)
+                    return
+                }
                 val url = intent?.getStringExtra("url")
                 val query = intent?.getStringExtra("query")
                 Log.i(TAG, "DEBUG_OPEN_BROWSER url=$url query=$query")
@@ -1324,7 +1334,14 @@ class MainActivity : AppCompatActivity() {
         // swallow gestures the wearer meant for the hub. So the first click
         // ACTIVATES and goes no further — it is the act of choosing the window,
         // not a click inside the page. Every click after that is the page's.
-        val window = hudPinBoardController?.browserWindowAt(pt.first, pt.second)
+        // …unless a full-screen panel is up. Settings covers the viewport, so
+        // any window under it is behind a modal surface and must not see the
+        // tap at all — otherwise pressing a settings card silently activates
+        // the window sitting beneath it and the panel appears dead. This is
+        // the ONLY way to enter a key on-device, so it has to win.
+        val modalUp = hubSettingsOverlay?.isShowing == true
+        val window = if (modalUp) null else
+            hudPinBoardController?.browserWindowAt(pt.first, pt.second)
         if (window != null) {
             if (!window.isActive) {
                 hudPinBoardController?.browserWindows()?.forEach {
@@ -1336,10 +1353,11 @@ class MainActivity : AppCompatActivity() {
             }
             // Already active: this one is for the page.
             if (forwardClickToWindow(window, pt.first, pt.second)) return
-        } else {
+        } else if (!modalUp) {
             // Clicking away from an active window releases it, which is what
             // makes the hub feel like it owns the cursor again without needing
-            // a deliberate exit gesture every time.
+            // a deliberate exit gesture every time. Taps that land on a modal
+            // panel are not "away" — they are not about the window at all.
             hudPinBoardController?.browserWindows()?.forEach { it.deactivate() }
         }
 

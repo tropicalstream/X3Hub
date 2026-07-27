@@ -14,6 +14,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.x3hub.app.core.config.ApiKeyStore
+import com.x3hub.app.core.config.KeyFile
 import java.io.File
 
 /**
@@ -86,7 +87,12 @@ class HubSettingsOverlay(
      * key FILE wins over the stored value, so when it is set that is the
      * string that will actually be sent to the provider.
      */
-    data class StoredKey(val value: String, val fromKeyFile: Boolean)
+    data class StoredKey(
+        val value: String,
+        val fromKeyFile: Boolean,
+        /** Which file answered — it is not always the slot's own. */
+        val sourceFileName: String? = null
+    )
 
     // ── View tree (built once, then shown/hidden) ─────────────────────
 
@@ -410,7 +416,7 @@ class HubSettingsOverlay(
                 // so the honest distinction is which store answers, not who
                 // put it there.
                 val source = if (stored.fromKeyFile) {
-                    "from ${slot.pushFileName} — that file wins"
+                    "from ${stored.sourceFileName ?: slot.pushFileName} — that file wins"
                 } else {
                     "saved on this device"
                 }
@@ -797,7 +803,7 @@ class HubSettingsOverlay(
                     id = SLOT_GEMINI,
                     title = "Gemini",
                     purpose = "Voice assistant (Live API)",
-                    hint = "AIza…",
+                    hint = "AIza… or AQ.…",
                     pushFileName = GEMINI_FILE,
                     broadcastAction = "com.x3hub.app.SET_API_KEY",
                     // ApiKeyStore owns the resolution order; asking it rather
@@ -848,14 +854,18 @@ class HubSettingsOverlay(
 
         /** Pushed file first, then the stored value — ApiKeyStore's order. */
         private fun readKey(context: Context, fileName: String, prefKey: String): StoredKey? {
+            // provider id is the file's stem: "groq_api_key.txt" -> "groq".
+            val provider = fileName.removeSuffix("_api_key.txt")
             val fromFile = runCatching {
-                keyFile(context, fileName)
-                    ?.takeIf { it.exists() }
-                    ?.readText()
-                    ?.trim()
-                    ?.takeIf { it.isNotBlank() }
+                KeyFile.resolveFromDir(context.getExternalFilesDir(null), provider)
             }.getOrNull()
-            if (fromFile != null) return StoredKey(fromFile, fromKeyFile = true)
+            if (fromFile != null) {
+                return StoredKey(
+                    fromFile.value,
+                    fromKeyFile = true,
+                    sourceFileName = fromFile.fileName
+                )
+            }
             val fromPref = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
                 .getString(prefKey, null)
                 ?.trim()

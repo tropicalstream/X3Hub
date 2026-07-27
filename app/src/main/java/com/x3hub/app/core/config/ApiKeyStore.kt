@@ -4,7 +4,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import java.io.File
 
 /**
  * Gemini API key resolution for X3Gemini. There is no companion app
@@ -39,9 +38,9 @@ object ApiKeyStore {
         cachedKey?.let { if (now - cachedAtMs < CACHE_TTL_MS) return it }
 
         val fromFile = runCatching {
-            val dir = context.getExternalFilesDir(null) ?: return@runCatching null
-            val f = File(dir, KEY_FILE_NAME)
-            if (f.exists()) f.readText().trim().takeIf { it.isNotBlank() } else null
+            KeyFile.resolveFromDir(context.getExternalFilesDir(null), "gemini")
+                ?.also { if (it.fileName != KEY_FILE_NAME) Log.i(TAG, "gemini key from ${it.fileName}") }
+                ?.value
         }.getOrNull()
 
         val key = fromFile ?: context
