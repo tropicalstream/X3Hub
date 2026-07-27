@@ -44,6 +44,7 @@ import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.DimController
 import com.x3hub.app.core.agent.AgentTaskBridge
+import com.x3hub.app.core.web.AdBlock
 import com.x3hub.app.core.agent.PageAgentController
 import com.x3hub.app.ui.HubSettingsOverlay
 import com.x3hub.app.ui.HudPinBoardController
@@ -251,6 +252,11 @@ class MainActivity : AppCompatActivity() {
                 intent?.getStringExtra("zoom")?.toFloatOrNull()?.let { f ->
                     hudPinBoardController?.browserWindows()?.firstOrNull()
                         ?.debugZoomBy(f)
+                    return
+                }
+                if (intent?.getStringExtra("adblock") != null) {
+                    Log.i(TAG, "AdBlock ready=${AdBlock.ready()} domains=${AdBlock.size()} " +
+                        "blockedThisPage=${AdBlock.blockCount()} err=${AdBlock.loadError}")
                     return
                 }
                 intent?.getStringExtra("say")?.let { text ->

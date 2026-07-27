@@ -142,18 +142,37 @@ class GeminiLiveClient(
             return socket.send(payload.toString())
         }
 
-        /** Inject a text message into the Live session as client context. */
-        fun sendClientText(text: String): Boolean {
+        /**
+         * Inject a text message into the Live session as client context.
+         *
+         * [imageBase64] matters more than it looks. Camera frames stream over
+         * realtimeInput, and the model associates those with a SPOKEN turn —
+         * a clientContent turn is a separate channel and carries no video, so
+         * a typed "what am I looking at?" gets answered "please double-tap the
+         * left temple arm to activate the camera" while the camera is plainly
+         * streaming. The frame has to ride along in the turn itself.
+         */
+        fun sendClientText(text: String, imageBase64: String? = null): Boolean {
             if (text.isBlank()) return false
+            val parts = JSONArray()
+            // Image FIRST: Gemini reads parts in order, and a question that
+            // arrives before its picture is a question about nothing.
+            if (!imageBase64.isNullOrBlank()) {
+                parts.put(
+                    JSONObject().put(
+                        "inlineData",
+                        JSONObject()
+                            .put("mimeType", "image/jpeg")
+                            .put("data", imageBase64)
+                    )
+                )
+            }
+            parts.put(JSONObject().put("text", text))
             val payload = JSONObject().put(
                 "clientContent",
                 JSONObject()
                     .put("turns", JSONArray().put(
-                        JSONObject()
-                            .put("role", "user")
-                            .put("parts", JSONArray().put(
-                                JSONObject().put("text", text)
-                            ))
+                        JSONObject().put("role", "user").put("parts", parts)
                     ))
                     .put("turnComplete", true)
             )

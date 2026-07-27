@@ -13,6 +13,7 @@ import com.x3hub.app.core.bridge.HudPinStore
 import com.x3hub.app.core.chat.ChatSessionModel
 import com.x3hub.app.core.live.LiveCardEngine
 import com.x3hub.app.core.reminders.ReminderScheduler
+import com.x3hub.app.core.web.AdBlock
 
 /**
  * Application subclass. Owns the single process-wide [ChatSessionModel]
@@ -54,6 +55,10 @@ class X3HubApp : Application() {
         // display path. Defensive re-init also happens in MainActivity.
         runCatching { com.ffalcon.mercury.android.sdk.MercurySDK.init(this) }
         HudPinStore.init(this)
+        // ~93k domains parsed off the main thread. Started here rather than
+        // when a window opens: the first page a wearer opens is the one most
+        // worth filtering, and a cold list answers "allow" to everything.
+        AdBlock.warmUp(this)
         AssistantStore.init(this)
         // Re-arm every stored reminder — alarms don't survive process death
         // or reboots, the prefs-backed store does. Missed ones fire now.

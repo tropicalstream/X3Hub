@@ -336,8 +336,15 @@ class GeminiVoicePipeline(context: Context) {
         if (text.isBlank()) return
         heardUserYet = true
         noteConversationActivity()
-        val ok = liveSession?.sendClientText(text) == true
-        Log.i(TAG, "sendDebugText ok=$ok: ${text.take(80)}")
+        // Attach the current camera frame, freshness-gated the same way the
+        // tools are. Without it a typed question is blind even while the
+        // preview is streaming — the video rides realtimeInput, and this turn
+        // does not.
+        val frame = latestCameraFrame?.takeIf {
+            SystemClock.elapsedRealtime() - lastCameraFrameMs < CAMERA_FRESH_WINDOW_MS
+        }
+        val ok = liveSession?.sendClientText(text, frame) == true
+        Log.i(TAG, "sendDebugText ok=$ok frame=${frame != null}: ${text.take(80)}")
     }
 
     private fun noteConversationActivity() {

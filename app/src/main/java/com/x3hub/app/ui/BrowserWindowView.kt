@@ -9,6 +9,7 @@ import android.util.AttributeSet
 import android.util.Log
 import android.view.Gravity
 import com.x3hub.app.BuildConfig
+import com.x3hub.app.core.web.AdBlock
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.InputMethodManager
@@ -142,6 +143,26 @@ class BrowserWindowView @JvmOverloads constructor(
      * Exists to settle whether visionOS-style "content scales with the
      * window" can be had without the re-navigation that resize does today.
      */
+    /**
+     * Service-worker requests never reach a WebViewClient, so a site that
+     * fetches its ads through one would sail straight past
+     * [requestInterceptor]. The controller is process-global — installing it
+     * per window is harmless and idempotent, and it means no window can be
+     * created without it.
+     */
+    private fun installServiceWorkerFilter() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        runCatching {
+            android.webkit.ServiceWorkerController.getInstance().setServiceWorkerClient(
+                object : android.webkit.ServiceWorkerClient() {
+                    override fun shouldInterceptRequest(
+                        request: WebResourceRequest
+                    ): WebResourceResponse? = AdBlock.intercept(request)
+                }
+            )
+        }
+    }
+
     /** Probe: run arbitrary JS in the page and log the result. */
     fun debugEval(js: String) {
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
@@ -239,6 +260,11 @@ class BrowserWindowView @JvmOverloads constructor(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         )
+        // Every window filters. An ad slot is merely annoying on a phone; in
+        // a 170px window it can BE the page, and each banner is one more
+        // clickable thing the page agent has to reason about.
+        requestInterceptor = { req -> AdBlock.intercept(req) }
+        installServiceWorkerFilter()
         configureWebView(webView)
         addView(webView)
 
