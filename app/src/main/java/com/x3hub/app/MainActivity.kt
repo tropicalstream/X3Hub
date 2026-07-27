@@ -43,6 +43,7 @@ import kotlinx.coroutines.launch
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.DimController
+import com.x3hub.app.core.agent.PageAgent
 import com.x3hub.app.ui.HubSettingsOverlay
 import com.x3hub.app.ui.HudPinBoardController
 
@@ -108,10 +109,14 @@ class MainActivity : AppCompatActivity() {
     /** How many taps deep the current chain is: 1 single, 2 double, 3 triple. */
     private var rightArmTapStreak = 0
     private var hubSettingsOverlay: HubSettingsOverlay? = null
+
+    /** Double-tap on a window: "tell me about this page". */
+    private val pageAgent by lazy { PageAgent(applicationContext) { msg -> showNotice(msg) } }
     private var dimController: DimController? = null
     /** The window currently in modify mode, so a swipe knows what to resize. */
     private var modifyingWindow: BrowserWindowView? = null
     private var lastRightArmTapUpAcceptedMs: Long = 0L
+    private var lastRightArmTapSource: TapSource? = null
 
     // Right-arm TOUCH tap detection (cyttsp5 down+up with little movement).
     private var rightArmTouchDownMs: Long = 0L
@@ -894,6 +899,11 @@ class MainActivity : AppCompatActivity() {
                 rightArmTouchDownY = ev.y
                 rightArmTouchMoved = false
                 rightArmTouchTracking = true
+                // Deliberately NOT cancelling the pending click here: the
+                // finger going down again is how a double-tap BEGINS, and
+                // clearing the streak on it means the pair can never form.
+                // The cancel belongs on the move-flip below, where the touch
+                // has proved it is a drag rather than the next tap.
                 setCursorVisible(true)
             }
             MotionEvent.ACTION_MOVE -> {
@@ -913,6 +923,7 @@ class MainActivity : AppCompatActivity() {
                     if (kotlin.math.hypot(tdx.toDouble(), tdy.toDouble()) >
                             RIGHT_ARM_TAP_MOVE_TOLERANCE_PX) {
                         rightArmTouchMoved = true
+                        cancelPendingSingleTapClick()
                     }
                 }
                 if (!droppedFirstDelta) {
@@ -944,7 +955,7 @@ class MainActivity : AppCompatActivity() {
                 val elapsed = SystemClock.uptimeMillis() - rightArmTouchDownMs
                 if (elapsed >= TAP_MAX_MS) return
                 Log.i(TAG, "Right-arm TOUCH tap (${elapsed}ms)")
-                onRightArmTapUp()
+                onRightArmTapUp(TapSource.TOUCH)
             }
             MotionEvent.ACTION_CANCEL -> {
                 rightArmTouchTracking = false
@@ -1179,40 +1190,68 @@ class MainActivity : AppCompatActivity() {
                 val elapsed = SystemClock.uptimeMillis() - rightArmKeyDownMs
                 if (elapsed >= TAP_MAX_MS) return true
                 Log.i(TAG, "Right-arm KEY tap (${elapsed}ms, code=${event.keyCode})")
-                onRightArmTapUp()
+                onRightArmTapUp(TapSource.KEY)
                 return true
             }
         }
         return true
     }
 
+    /** Which transport delivered a tap. The echo is one tap on both. */
+    private enum class TapSource { KEY, TOUCH }
+
+    /** Drop a queued click and reset the streak it belonged to. */
+    private fun cancelPendingSingleTapClick() {
+        pendingSingleTapClick?.let { uiHandler.removeCallbacks(it) }
+        pendingSingleTapClick = null
+        rightArmTapStreak = 0
+        rightArmKeyLastTapUpMs = 0L
+    }
+
     /**
-     * Shared single/double-tap dispatch for the right arm, driven by
-     * whichever path delivers the tap (KEY event or cyttsp5 touch). A
-     * short dedupe window collapses one physical tap that arrives on
-     * BOTH paths into a single logical tap. Single tap → click at cursor
-     * after the double-tap window; double tap → [onRightArmDoubleTap].
+     * Shared single/double/triple-tap dispatch for the right arm, driven by
+     * whichever path delivers the tap.
+     *
+     * Two things here are load-bearing and were previously wrong.
+     *
+     * DEDUPE IS BY SOURCE, NOT BY CLOCK. One physical tap arrives on both the
+     * KEY path and the cyttsp5 touch path, and the old filter dropped anything
+     * within 90ms of the last accepted tap. But gaps are measured UP-to-UP, and
+     * a brisk triple-tap is a ~80ms rhythm — so the third tap of a real triple
+     * was discarded as an echo and the streak resolved as a DOUBLE. With
+     * double-tap now invoking the page agent that misfire costs a network call.
+     * Two taps from the SAME transport are always two taps.
+     *
+     * MOST TAPS ARE NOT DEFERRED. Waiting out the multi-tap window costs the
+     * wearer 340ms of silence on every tap, and silence is what makes people
+     * tap again — which cancelled the pending click and fired the double
+     * instead. So the deferral is now paid ONLY where a second meaning
+     * actually exists: a tap into an already-ACTIVE page, where a click could
+     * navigate irreversibly. Everywhere else — the hub, the gear, settings,
+     * the character grid, an INERT window — the click fires immediately and
+     * the streak keeps counting behind it. A 1→3 chain on an INERT window
+     * still lands correctly: activate() then setModify(true) is the right end
+     * state either way.
      */
-    private fun onRightArmTapUp() {
+    private fun onRightArmTapUp(source: TapSource) {
         val now = SystemClock.uptimeMillis()
-        if (now - lastRightArmTapUpAcceptedMs < RIGHT_ARM_TAP_DEDUPE_MS) {
-            // Same physical tap echoed as both a key and a touch — ignore.
+        if (source != lastRightArmTapSource &&
+            now - lastRightArmTapUpAcceptedMs < RIGHT_ARM_TAP_DEDUPE_MS
+        ) {
+            // Same physical tap echoed on the other transport — ignore.
             return
         }
         lastRightArmTapUpAcceptedMs = now
+        lastRightArmTapSource = source
 
-        // x3hub counts to THREE, and that costs something worth naming.
-        //
-        // X3Gemini fired the double-tap the instant the second tap landed.
-        // A third meaning cannot coexist with that: to know a pair is really a
-        // pair, you have to wait out the window in which a third could arrive.
-        // So the double-tap action is now DEFERRED by one window, and entering
-        // pin-modify feels marginally later than it used to. That is the whole
-        // price of triple-tap and it is paid only on multi-taps — a single tap
-        // is unchanged, and single taps are almost all of them.
+        // The 2→3 gap gets a longer tolerance than the 1→2 gap. They are not
+        // the same act: the second tap follows the first at whatever rhythm
+        // feels natural, while the third is a deliberate "no, I meant the
+        // other thing" and arrives later. One window for both meant a
+        // comfortable triple was read as a double plus a stray click.
         val gap = now - rightArmKeyLastTapUpMs
-        val chained = rightArmKeyLastTapUpMs > 0L &&
-            gap in DOUBLE_TAP_MIN_GAP_MS..DOUBLE_TAP_WINDOW_MS
+        val window = if (rightArmTapStreak >= 2) TRIPLE_TAP_WINDOW_MS else DOUBLE_TAP_WINDOW_MS
+        val chained = rightArmKeyLastTapUpMs > 0L && gap <= window
         rightArmTapStreak = if (chained) rightArmTapStreak + 1 else 1
         rightArmKeyLastTapUpMs = now
 
@@ -1228,59 +1267,77 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Latch WHERE the tap happened. performClickAtCursor used to sample
+        // the cursor when the timer fired, so drifting the cursor during the
+        // wait sent the click somewhere the wearer never aimed — off the gear
+        // and onto empty space, which starts a live microphone session.
+        val point = cursorInteractionPoint()
+
+        if (rightArmTapStreak == 1 && !tapNeedsDeferral(point)) {
+            performClickAtCursor(point)
+            // The streak keeps running: a second or third tap still resolves
+            // to the agent or to MODIFY, it just no longer holds the first
+            // click hostage while it waits to find out.
+            val streakGuard = Runnable {
+                pendingSingleTapClick = null
+                rightArmTapStreak = 0
+                rightArmKeyLastTapUpMs = 0L
+            }
+            pendingSingleTapClick = streakGuard
+            uiHandler.postDelayed(streakGuard, TRIPLE_TAP_WINDOW_MS + 20L)
+            return
+        }
+
         val streakAtSchedule = rightArmTapStreak
         val resolve = Runnable {
             pendingSingleTapClick = null
             rightArmTapStreak = 0
             rightArmKeyLastTapUpMs = 0L
-            if (streakAtSchedule >= 2) onRightArmDoubleTap(gap) else performClickAtCursor()
+            if (streakAtSchedule >= 2) onRightArmDoubleTap(gap) else performClickAtCursor(point)
         }
         pendingSingleTapClick = resolve
-        uiHandler.postDelayed(resolve, DOUBLE_TAP_WINDOW_MS + 20L)
+        uiHandler.postDelayed(resolve, window + 20L)
     }
 
     /**
-     * Three taps. Inside an ACTIVE browser window it means "give me back the
-     * cursor"; anywhere else it opens settings.
-     *
-     * Deliberately NOT settings-from-inside-a-window: SmartView used triple-tap
-     * for its own settings, and keeping that here would mean the same gesture
-     * did two different things depending on a focus state the wearer cannot
-     * always see. Leaving the window is the more useful of the two, because
-     * without it an active window has no keyboard-free way out.
+     * True only where a single tap is irreversible enough to be worth waiting
+     * on: inside a page that already has the input, where a click can navigate
+     * away. Everything else is cheap to undo, so it fires at once.
      */
-    private fun onRightArmTripleTap() {
-        val active = hudPinBoardController?.browserWindows()?.firstOrNull { it.isActive }
-        if (active != null) {
-            Log.i(TAG, "Triple-tap inside an active browser window — releasing it")
-            active.requestExit()
-            setCursorVisible(true)
-            return
-        }
-        Log.i(TAG, "Triple-tap on the hub — settings")
-        hubSettingsOverlay?.show()
+    private fun tapNeedsDeferral(point: Pair<Float, Float>): Boolean {
+        if (hubSettingsOverlay?.isShowing == true) return false
+        val window = hudPinBoardController?.browserWindowAt(point.first, point.second)
+            ?: return false
+        return window.isActive && hudPinBoardController?.isInModifyMode() != true
     }
 
-    private fun onRightArmDoubleTap(gapMs: Long) {
-        Log.i(TAG, "Right-arm double-tap (gap=${gapMs}ms)")
-        // Pin board gets first refusal: exit modify mode, or enter it
-        // when the cursor rests on a pin (move/delete flow, as before).
+    /**
+     * Three taps. On a window it is window control (MODIFY: move, resize,
+     * delete); anywhere else it opens settings.
+     *
+     * Window control moved here from double-tap so that double-tap can mean
+     * the page agent, which is the thing a wearer reaches for far more often
+     * than moving a window. Three taps is the right price for the rarer and
+     * more destructive of the two — MODIFY carries a live delete chip.
+     *
+     * Leaving a window no longer needs its own gesture: a click outside it
+     * releases it, and entering MODIFY drops ACTIVE anyway.
+     */
+    private fun onRightArmTripleTap() {
         val controller = hudPinBoardController
+        val pt = cursorInteractionPoint()
         if (controller != null) {
             if (controller.isInModifyMode()) {
+                Log.i(TAG, "Triple-tap while modifying — leaving window control")
                 controller.exitModifyMode()
                 controller.browserWindows().forEach { it.setModify(false) }
                 modifyingWindow = null
+                setCursorVisible(true)
                 return
             }
-            val pt = cursorInteractionPoint()
             val window = controller.browserWindowAt(pt.first, pt.second)
             if (controller.onDoubleTapAt(pt.first, pt.second)) {
-                // A browser window enters modify alongside the board's own
-                // highlight-and-delete-chip. It needs telling separately
-                // because resize is its business, not the board's — and
-                // because modify must drop ACTIVE, or a resize swipe would
-                // scroll the page instead of resizing the window.
+                Log.i(TAG, "Triple-tap on a pin — window control")
                 if (window != null) {
                     window.setModify(true)
                     modifyingWindow = window
@@ -1289,7 +1346,53 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         }
-        // Otherwise: toggle the Gemini session (activate ↔ full exit).
+        Log.i(TAG, "Triple-tap on the hub — settings")
+        hubSettingsOverlay?.show()
+    }
+
+    /**
+     * Two taps. On a window it asks the page agent about that page; on empty
+     * space it toggles the Gemini session.
+     *
+     * It must NOT fall through to toggleGeminiSession for anything else. That
+     * used to be the default landing spot for any unclassified double-tap,
+     * which meant double-clicking a HUD widget — the gear, a settings button,
+     * the natural desktop instinct — opened a live microphone or tore down a
+     * conversation in progress. The most side-effectful thing in the app is
+     * the wrong place to land by accident.
+     */
+    private fun onRightArmDoubleTap(gapMs: Long) {
+        Log.i(TAG, "Right-arm double-tap (gap=${gapMs}ms)")
+        val controller = hudPinBoardController
+        val pt = cursorInteractionPoint()
+
+        if (hubSettingsOverlay?.isShowing == true) {
+            // A panel is up; a second tap on a button is just a second press.
+            performClickAtCursor(pt)
+            return
+        }
+
+        if (controller != null) {
+            if (controller.isInModifyMode()) {
+                // Window control is triple-tap now, so a double while in it is
+                // a mis-tap, not an exit. Consume it: exiting on a stray pair
+                // would be a surprise, and the delete chip is live.
+                Log.i(TAG, "Double-tap while modifying — ignored")
+                return
+            }
+            val window = controller.browserWindowAt(pt.first, pt.second)
+            if (window != null) {
+                Log.i(TAG, "Double-tap on a window — page agent")
+                pageAgent.ask(window)
+                return
+            }
+        }
+
+        // Empty space only.
+        if (findOverlayHit(pt.first, pt.second) != null) {
+            Log.i(TAG, "Double-tap on HUD chrome — ignored")
+            return
+        }
         toggleGeminiSession()
     }
 
@@ -1307,6 +1410,10 @@ class MainActivity : AppCompatActivity() {
         screenX: Float,
         screenY: Float
     ): Boolean {
+        // A drag already owns the pointer. Injecting a second DOWN/UP here
+        // would tear the scroll in half and click whatever moved under the
+        // frozen cursor.
+        if (draggingWindow != null) return false
         val origin = IntArray(2)
         window.getLocationOnScreen(origin)
         val localX = screenX - origin[0]
@@ -1323,8 +1430,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Synthetic click at the cursor through the overlay hit-test chain. */
-    private fun performClickAtCursor() {
-        val pt = cursorInteractionPoint()
+    /** [point] is latched at TAP time, not sampled when a timer fires. */
+    private fun performClickAtCursor(point: Pair<Float, Float>? = null) {
+        val pt = point ?: cursorInteractionPoint()
 
         // A browser window gets first refusal, because it is the only surface
         // whose behaviour depends on whether it already has the input.
@@ -1495,8 +1603,14 @@ class MainActivity : AppCompatActivity() {
         // Tap timing — TapInsight-proven constants. The 40ms floor
         // filters a single physical tap echoing as two keycodes.
         private const val TAP_MAX_MS = 400L
-        private const val DOUBLE_TAP_MIN_GAP_MS = 40L
-        private const val DOUBLE_TAP_WINDOW_MS = 320L
+        /**
+         * Chaining windows. The 1->2 gap is paid on every deferred click, so
+         * it is short; the 2->3 gap is paid only by someone already
+         * multi-tapping, so it is generous. A single window for both made a
+         * comfortable triple resolve as a double.
+         */
+        private const val DOUBLE_TAP_WINDOW_MS = 200L
+        private const val TRIPLE_TAP_WINDOW_MS = 400L
 
         private const val LEFT_ARM_TAP_MOVE_TOLERANCE_PX = 60f
         // A right-pad touch that moves less than this (raw px) is a tap,

@@ -147,6 +147,28 @@ class BrowserWindowView @JvmOverloads constructor(
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
     }
 
+    /**
+     * The page's readable text, for the page agent. innerText rather than
+     * textContent on purpose: it respects display:none and collapses the
+     * whitespace, so navigation furniture and hidden menus do not drown the
+     * article in a window this small.
+     */
+    fun extractVisibleText(callback: (String?) -> Unit) {
+        webView.evaluateJavascript(
+            "(function(){try{" +
+                "var m=document.querySelector('main,article,[role=main]');" +
+                "return ((m||document.body).innerText||'').slice(0,20000);" +
+                "}catch(e){return ''}})()"
+        ) { raw ->
+            // evaluateJavascript hands back a JSON string literal.
+            val decoded = runCatching {
+                if (raw == null || raw == "null") null
+                else org.json.JSONTokener(raw).nextValue() as? String
+            }.getOrNull()
+            callback(decoded)
+        }
+    }
+
     fun debugZoomBy(factor: Float) {
         Log.i(TAG, "debugZoomBy($factor) from scale=$currentScale " +
             "supportZoom=${webView.settings.supportZoom()} " +
