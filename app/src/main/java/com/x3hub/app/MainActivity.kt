@@ -43,6 +43,7 @@ import kotlinx.coroutines.launch
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.DimController
+import com.x3hub.app.core.agent.AgentTaskBridge
 import com.x3hub.app.core.agent.PageAgentController
 import com.x3hub.app.ui.HubSettingsOverlay
 import com.x3hub.app.ui.HudPinBoardController
@@ -250,6 +251,43 @@ class MainActivity : AppCompatActivity() {
                 intent?.getStringExtra("zoom")?.toFloatOrNull()?.let { f ->
                     hudPinBoardController?.browserWindows()?.firstOrNull()
                         ?.debugZoomBy(f)
+                    return
+                }
+                intent?.getStringExtra("voice")?.let { want ->
+                    // Starting a session normally means tapping empty space,
+                    // and "empty" depends on what is on the board — with the
+                    // camera preview up there is no empty space at all. A
+                    // scripted sequence needs a door that does not move.
+                    val idle = HudStateBridge.current().phase ==
+                        HudStateBridge.VoicePhase.IDLE
+                    val target = when (want.lowercase()) {
+                        "on" -> true
+                        "off" -> false
+                        else -> idle
+                    }
+                    Log.i(TAG, "DEBUG voice want=$want idle=$idle -> $target")
+                    if (target && idle) toggleGeminiSession()
+                    else if (!target && !idle) exitGeminiFully()
+                    return
+                }
+                intent?.getStringExtra("camera")?.let { want ->
+                    // The left pad is the real camera gesture, but injected
+                    // touches only ever carry the name "Virtual" and the debug
+                    // relaxation maps those to the RIGHT pad — so there is no
+                    // way to reach the camera from adb without this.
+                    //
+                    // on/off rather than a bare toggle: a blind toggle makes a
+                    // scripted sequence depend on what the last run left
+                    // behind, and a second "camera on" silently turns it off.
+                    val preview = findViewById<View?>(R.id.unipanelCameraPreviewFrame)
+                    val isOn = preview?.visibility == View.VISIBLE
+                    val target = when (want.lowercase()) {
+                        "on" -> true
+                        "off" -> false
+                        else -> !isOn
+                    }
+                    Log.i(TAG, "DEBUG camera want=$want isOn=$isOn -> $target")
+                    if (target != isOn) toggleCamera()
                     return
                 }
                 intent?.getStringExtra("js")?.let { js ->
@@ -743,6 +781,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         hudPinBoardController?.onBrowserWindowCreated = { w -> agentFor(w) }
+        AgentTaskBridge.setListener { task ->
+            uiHandler.post {
+                // The ACTIVE window if there is one, else the only window —
+                // saying "play the first result" right after opening a page
+                // should not also require clicking it first.
+                val c = hudPinBoardController
+                val target = c?.browserWindows()?.firstOrNull { it.isActive }
+                    ?: c?.browserWindows()?.singleOrNull()
+                if (target == null) {
+                    showNotice("Open a page first, then give the agent a task.")
+                } else {
+                    if (!target.isActive) {
+                        c?.browserWindows()?.forEach { if (it !== target) it.deactivate() }
+                        target.activate()
+                    }
+                    agentFor(target).run(task)
+                }
+            }
+        }
         hudPinBoardController?.onBrowserWindowReleased = { w ->
             // The agent controller holds the window and a watchdog Runnable;
             // dropping the map entry without destroy() would keep both alive.

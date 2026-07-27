@@ -71,6 +71,9 @@ class GeminiLiveClient(
                 "- custom_command: saved named prompts. 'Save a command called X that does Y' " +
                 "→ action=save. 'Run my X' → action=run, then CARRY OUT the returned prompt " +
                 "completely (it may use search, reminders, pins). Great for a morning report.\n" +
+                "- page_agent: hand an errand to the agent inside an already-open window " +
+                "('play the first result', 'search that page for X', 'press play'). " +
+                "Open a window first if there is none.\n" +
                 "- open_browser: OPEN A WEB PAGE in a small window pinned to the display. This is " +
                 "what x3hub adds over a plain voice assistant — when the user asks to open, " +
                 "show, look at, read, watch or play anything on the web ('open Wikipedia', " +
@@ -491,6 +494,23 @@ class GeminiLiveClient(
                         .put("description", "The page to open: a full https URL or a bare host like 'wikipedia.org'."))
                     .put("query", JSONObject().put("type", "STRING")
                         .put("description", "What to search for, in plain language, when no specific site is named.")))))
+
+        tools.put(JSONObject()
+            .put("name", "page_agent")
+            .put("description",
+                "Give the ACTIVE browser window's on-page agent an errand to carry out: it " +
+                    "reads the page, clicks, types and scrolls on the wearer's behalf. Use for " +
+                    "'on that page, …', 'play the first recording', 'search there for X', " +
+                    "'find the opening hours', 'press play'. Requires a window to already be " +
+                    "open — call open_browser first if there is none. The agent may follow " +
+                    "links to finish the errand and reports back when it is done, so after " +
+                    "this returns just say briefly that it is working; do NOT narrate the page.")
+            .put("parameters", JSONObject()
+                .put("type", "OBJECT")
+                .put("properties", JSONObject()
+                    .put("task", JSONObject().put("type", "STRING")
+                        .put("description", "The errand, in plain language, as the wearer said it.")))
+                .put("required", JSONArray().put("task"))))
 
         tools.put(JSONObject()
             .put("name", "camera_action")

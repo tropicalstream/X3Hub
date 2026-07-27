@@ -135,6 +135,7 @@ class GeminiVoicePipeline(context: Context) {
             Log.d(TAG, "activate(): already in progress / active, skipping")
             return
         }
+        heardUserYet = false
         bargeInEnabled = HubPrefs.bargeInEnabled(appContext)
         Log.i(TAG, "activate(): barge-in ${if (bargeInEnabled) "on" else "off (wait for reply)"}")
 
@@ -334,6 +335,17 @@ class GeminiVoicePipeline(context: Context) {
         lastConversationActivityMs = SystemClock.uptimeMillis()
     }
 
+    /**
+     * False until the wearer has actually said something this session.
+     *
+     * The hang-up timer used to be the same 5s from the instant the socket
+     * opened, so activating the assistant and then taking a breath to
+     * decide what to ask lost the session before a word was spoken — and it
+     * closed silently, so the next thing said went nowhere. Gathering a
+     * thought is not the same as a conversation having ended.
+     */
+    @Volatile private var heardUserYet: Boolean = false
+
     private fun createListener(epoch: Long): GeminiLiveClient.LiveSessionListener {
         return object : GeminiLiveClient.LiveSessionListener {
             override fun onSessionReady() {
@@ -355,6 +367,7 @@ class GeminiVoicePipeline(context: Context) {
             override fun onInputTranscription(text: String) {
                 if (!isSessionEpochCurrent(epoch)) return
                 if (text.isBlank()) return
+                heardUserYet = true
                 noteConversationActivity()
                 latestInputTranscript = text
                 Log.d(TAG, "onInputTranscription: '${text.take(120)}'")
@@ -535,7 +548,8 @@ class GeminiVoicePipeline(context: Context) {
                     continue
                 }
                 val idleFor = now - lastConversationActivityMs
-                if (idleFor >= SILENCE_END_MS) {
+                val limit = if (heardUserYet) SILENCE_END_MS else SILENCE_OPENING_MS
+                if (idleFor >= limit) {
                     Log.i(TAG, "Silence watchdog: ${idleFor}ms of mutual silence — ending session")
                     shutdown(reason = null)
                     break
@@ -796,6 +810,12 @@ class GeminiVoicePipeline(context: Context) {
 
         /** Mars's spec: mutual silence that ends the conversation. */
         private const val SILENCE_END_MS = 5_000L
+
+        /**
+         * Grace before the FIRST utterance. Long enough to activate the
+         * assistant, look at what you meant to ask about, and speak.
+         */
+        private const val SILENCE_OPENING_MS = 20_000L
         private const val SILENCE_WATCHDOG_TICK_MS = 250L
 
         /** How long after a turn completes to drop duplicate late output

@@ -31,7 +31,8 @@ class ToolDispatcher(
         // board then builds a live WebView for. The tool itself never touches a
         // view — it runs on a voice-tool coroutine with no activity — so it
         // goes through HudPinStore exactly as HudPinTool does.
-        BrowserTool(context)
+        BrowserTool(context),
+        PageAgentTool(context)
     ).associateBy { it.name }
 
     fun isSupported(name: String): Boolean = tools.containsKey(name.trim())
