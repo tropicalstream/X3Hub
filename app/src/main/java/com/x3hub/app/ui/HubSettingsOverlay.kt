@@ -14,6 +14,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.x3hub.app.core.config.ApiKeyStore
+import com.x3hub.app.core.config.HubPrefs
 import com.x3hub.app.core.config.KeyFile
 import java.io.File
 
@@ -262,8 +263,59 @@ class HubSettingsOverlay(
         slots.forEach { row.addView(buildCard(it)) }
         col.addView(row)
 
+        col.addView(buildBargeInRow())
         col.addView(pasteHelpBox())
         return col
+    }
+
+    /**
+     * The one non-key setting so far, and it earns its place: the glasses
+     * have no platform AEC on the raw mic, so with barge-in on, Gemini's
+     * own voice can come back loudly enough to interrupt itself and be
+     * transcribed as the wearer. That depends entirely on the room, so it
+     * has to be the wearer's choice rather than a constant.
+     */
+    private fun buildBargeInRow(): View {
+        val rowBg = boxBg(fill = 0x14FFFFFF, stroke = 0x40FFFFFF, strokeW = 1)
+        val row = LinearLayout(activity)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.background = rowBg
+        row.setPadding(10, 6, 10, 6)
+        row.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
+
+        val text = LinearLayout(activity)
+        text.orientation = LinearLayout.VERTICAL
+        text.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        text.addView(label("Interrupting Gemini", 16f, ACCENT, bold = true))
+        val sub = label("", 13f, DIM).apply { maxLines = 2 }
+        text.addView(sub)
+        row.addView(text)
+
+        // The button shows the state, and tapping it changes to the other —
+        // one control, no separate on/off indicator to fall out of sync.
+        lateinit var toggle: TextView
+        fun render() {
+            val on = HubPrefs.bargeInEnabled(activity)
+            toggle.text = if (on) "Can interrupt" else "Waits for reply"
+            sub.text = if (on) {
+                "Talk over a reply to stop it. Can echo: in a loud room Gemini may hear itself."
+            } else {
+                "The mic is off while Gemini speaks, so nothing echoes. You wait for the reply."
+            }
+        }
+        toggle = button("", 200) {
+            val next = !HubPrefs.bargeInEnabled(activity)
+            HubPrefs.setBargeInEnabled(activity, next)
+            render()
+            showToast(
+                if (next) "Barge-in on. Restart the session to apply."
+                else "Gemini will finish speaking first. Restart the session to apply."
+            )
+        }
+        render()
+        row.addView(toggle)
+        return row
     }
 
     /**

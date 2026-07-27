@@ -18,7 +18,8 @@ import java.util.concurrent.TimeUnit
  * hardcoded model (gemini-2.5-flash-native-audio-preview-12-2025, the
  * model validated end-to-end on the X3 glasses), default voice (no
  * speechConfig), barge-in enabled via default-sensitivity server VAD,
- * and exactly three tool surfaces: camera_action, hud_pin, googleSearch.
+ * and the tool surfaces x3hub exposes: open_browser, camera_action,
+ * hud_pin, googleSearch and the assistant trio.
  *
  * New vs TapInsight: the `serverContent.interrupted` event is parsed and
  * surfaced as [LiveSessionListener.onInterrupted] so the pipeline can
@@ -70,12 +71,16 @@ class GeminiLiveClient(
                 "- custom_command: saved named prompts. 'Save a command called X that does Y' " +
                 "→ action=save. 'Run my X' → action=run, then CARRY OUT the returned prompt " +
                 "completely (it may use search, reminders, pins). Great for a morning report.\n" +
+                "- open_browser: OPEN A WEB PAGE in a small window pinned to the display. This is " +
+                "what x3hub adds over a plain voice assistant — when the user asks to open, " +
+                "show, look at, read, watch or play anything on the web ('open Wikipedia', " +
+                "'pull up the news', 'show me that on YouTube'), CALL THIS TOOL rather than " +
+                "describing the page aloud. Pass 'url' when a specific site is named, or " +
+                "'query' to search. The window opens inert; say in one short sentence that it " +
+                "is open and that a single click activates it.\n" +
                 "- Web search grounding is available for current information.\n\n" +
                 "CONSTRAINTS:\n" +
-                "- There is NO web browser on this device. You cannot open web pages, play " +
-                "videos or music, or post links. Never offer to open or show a URL; if the user " +
-                "asks, explain there is no browser and offer a spoken answer or a HUD pin instead.\n" +
-                "- Do not read URLs aloud.\n" +
+                "- Do not read URLs aloud — open them with the browser tool instead.\n" +
                 "- Answer in the language the user speaks to you."
 
         /** All known Gemini prebuilt voice names — unused (default voice), kept
@@ -457,9 +462,35 @@ class GeminiLiveClient(
         return LiveSessionHandle(socket)
     }
 
-    /** Tool declarations: camera_action + hud_pin (no add_icon — no browser). */
+    /**
+     * Tool declarations. open_browser is the one x3hub adds over X3Gemini,
+     * and it has to be DECLARED here, not merely routable in ToolDispatcher:
+     * a tool the model is never told about is a tool it will insist it does
+     * not have — which is exactly what the inherited "there is NO web
+     * browser" constraint used to make it say.
+     */
     private fun buildToolDeclarations(): JSONArray {
         val tools = JSONArray()
+
+        tools.put(JSONObject()
+            .put("name", "open_browser")
+            .put("description",
+                "Open a live web page in a small window pinned to the heads-up display. " +
+                    "Use whenever the user wants to SEE something on the web rather than be " +
+                    "told about it: 'open Wikipedia', 'pull up the BBC', 'show me the tide " +
+                    "times', 'play that on YouTube', 'look up X'. " +
+                    "Pass 'url' when the user names a site or page; pass 'query' to open a " +
+                    "search for it instead. With neither, a search home page opens. " +
+                    "At most three windows can be open at once; opening a fourth is refused, " +
+                    "so offer to close one. The window opens INERT — after it returns, say in " +
+                    "one short sentence that it is open and that one click activates it.")
+            .put("parameters", JSONObject()
+                .put("type", "OBJECT")
+                .put("properties", JSONObject()
+                    .put("url", JSONObject().put("type", "STRING")
+                        .put("description", "The page to open: a full https URL or a bare host like 'wikipedia.org'."))
+                    .put("query", JSONObject().put("type", "STRING")
+                        .put("description", "What to search for, in plain language, when no specific site is named.")))))
 
         tools.put(JSONObject()
             .put("name", "camera_action")

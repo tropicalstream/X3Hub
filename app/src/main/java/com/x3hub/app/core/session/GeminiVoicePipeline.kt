@@ -16,6 +16,7 @@ import com.x3hub.app.X3HubApp
 import com.x3hub.app.core.audio.GeminiAudioPlayer
 import com.x3hub.app.core.bridge.HudStateBridge
 import com.x3hub.app.core.config.ApiKeyStore
+import com.x3hub.app.core.config.HubPrefs
 import com.x3hub.app.core.network.GeminiLiveClient
 import com.x3hub.app.core.tools.ToolDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +66,13 @@ class GeminiVoicePipeline(context: Context) {
 
     /** Throttles the barge-in diagnostic so it can't flood logcat. */
     @Volatile private var lastBargeDiagMs: Long = 0L
+
+    /**
+     * Read once per session rather than per frame: the audio thread runs at
+     * 20ms and a SharedPreferences hit there would be wasteful, and changing
+     * the mode mid-reply would be confusing anyway.
+     */
+    @Volatile private var bargeInEnabled: Boolean = true
     @Volatile private var captureActive: Boolean = false
     @Volatile private var audioRecord: AudioRecord? = null
     @Volatile private var audioThread: Thread? = null
@@ -127,6 +135,8 @@ class GeminiVoicePipeline(context: Context) {
             Log.d(TAG, "activate(): already in progress / active, skipping")
             return
         }
+        bargeInEnabled = HubPrefs.bargeInEnabled(appContext)
+        Log.i(TAG, "activate(): barge-in ${if (bargeInEnabled) "on" else "off (wait for reply)"}")
 
         if (ContextCompat.checkSelfPermission(
                 appContext, Manifest.permission.RECORD_AUDIO
@@ -610,7 +620,15 @@ class GeminiVoicePipeline(context: Context) {
                     // gate, the path stays open for [BARGE_HANGOVER_MS] so a
                     // whole utterance travels intact.
                     var suppressToServer = false
-                    if (audioPlayer.isActivelySpeaking()) {
+                    if (audioPlayer.isActivelySpeaking() && !bargeInEnabled) {
+                        // Half-duplex: the wearer has asked Gemini to finish
+                        // before listening again. Nothing is forwarded while
+                        // it speaks, so no gate can be fooled and the model
+                        // cannot hear — or interrupt — itself.
+                        suppressToServer = true
+                        bargeFrames = 0
+                        userSpeakingUntilMs = 0L
+                    } else if (audioPlayer.isActivelySpeaking()) {
                         val out = audioPlayer.currentOutputLevel()
                         val gate = BARGE_BASE_LEVEL + BARGE_ECHO_REJECT * out
                         // Diagnostic: without real numbers, tuning this
