@@ -24,6 +24,14 @@ interface VoiceServiceApi {
      */
     fun toggleCamera()
 
+    /**
+     * Debug only: inject a typed turn as if the wearer had spoken it.
+     * The shoot rig cannot rely on a room — the host's audio may be routed
+     * to a muted external speaker — and a scripted capture needs the tool
+     * calls to happen deterministically.
+     */
+    fun sendDebugText(text: String) {}
+
     /** True when CameraX is currently streaming. */
     fun isCameraOn(): Boolean
 

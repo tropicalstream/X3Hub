@@ -86,6 +86,7 @@ class PageAgentController(
     }
 
     fun stop() {
+        AgentSpeech.stop()
         running = false
         taskText = null
         hops = 0
@@ -378,7 +379,11 @@ class PageAgentController(
             resumePending = false
             running = false
             clearWatchdog()
+            // Shown AND spoken. The notice strip holds about one line, and
+            // the window is too small to read a paragraph off — an answer
+            // that is only displayed is an answer the wearer never gets.
             showNotice(message)
+            AgentSpeech.speak(context, message)
         }
 
         @JavascriptInterface

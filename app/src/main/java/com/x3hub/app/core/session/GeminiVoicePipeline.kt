@@ -331,6 +331,15 @@ class GeminiVoicePipeline(context: Context) {
         }
     }
 
+    /** Debug only: a typed turn, treated exactly like a spoken one. */
+    fun sendDebugText(text: String) {
+        if (text.isBlank()) return
+        heardUserYet = true
+        noteConversationActivity()
+        val ok = liveSession?.sendClientText(text) == true
+        Log.i(TAG, "sendDebugText ok=$ok: ${text.take(80)}")
+    }
+
     private fun noteConversationActivity() {
         lastConversationActivityMs = SystemClock.uptimeMillis()
     }

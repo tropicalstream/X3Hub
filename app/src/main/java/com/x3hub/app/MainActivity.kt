@@ -253,6 +253,20 @@ class MainActivity : AppCompatActivity() {
                         ?.debugZoomBy(f)
                     return
                 }
+                intent?.getStringExtra("say")?.let { text ->
+                    Log.i(TAG, "DEBUG say: ${text.take(80)}")
+                    if (HudStateBridge.current().phase ==
+                        HudStateBridge.VoicePhase.IDLE
+                    ) {
+                        toggleGeminiSession()
+                        uiHandler.postDelayed(
+                            { runCatching { voiceServiceApi?.sendDebugText(text) } }, 2500L
+                        )
+                    } else {
+                        runCatching { voiceServiceApi?.sendDebugText(text) }
+                    }
+                    return
+                }
                 intent?.getStringExtra("voice")?.let { want ->
                     // Starting a session normally means tapping empty space,
                     // and "empty" depends on what is on the board — with the
