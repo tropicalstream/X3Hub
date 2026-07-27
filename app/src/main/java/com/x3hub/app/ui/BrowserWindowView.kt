@@ -147,6 +147,29 @@ class BrowserWindowView @JvmOverloads constructor(
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
     }
 
+    // ── Page-agent host API ───────────────────────────────────────────
+    //
+    // The agent lives inside the document, so it needs to run script in
+    // this window specifically and to be told when the document under it
+    // is replaced. With three windows there is no single "the WebView" to
+    // call back into, which is why these are instance methods rather than
+    // the activity-level singletons SmartView could get away with.
+
+    fun evaluateJavascript(script: String, callback: ((String?) -> Unit)? = null) {
+        webView.evaluateJavascript(script) { r -> callback?.invoke(r) }
+    }
+
+    @SuppressLint("JavascriptInterface")
+    fun addAgentBridge(bridge: Any, name: String) {
+        webView.addJavascriptInterface(bridge, name)
+    }
+
+    /** Navigation started — the agent instance in the old document is gone. */
+    var onPageStartedListener: ((String?) -> Unit)? = null
+
+    /** Document ready — the moment to re-inject and resume. */
+    var onPageFinishedListener: ((String?) -> Unit)? = null
+
     /**
      * The page's readable text, for the page agent. innerText rather than
      * textContent on purpose: it respects display:none and collapses the
@@ -352,6 +375,7 @@ class BrowserWindowView @JvmOverloads constructor(
             ) {
                 super.onPageStarted(view, url, favicon)
                 injectPolyfills()
+                onPageStartedListener?.invoke(url)
             }
 
             override fun onScaleChanged(view: WebView?, oldScale: Float, newScale: Float) {
@@ -374,6 +398,7 @@ class BrowserWindowView @JvmOverloads constructor(
                     ) { Log.i(TAG, "viewport $it (view=${width}x$height)") }
                 }
                 runCatching { CookieManager.getInstance().flush() }
+                onPageFinishedListener?.invoke(url)
             }
         }
     }
@@ -713,6 +738,22 @@ class BrowserWindowView @JvmOverloads constructor(
         private val POLYFILL_JS = """
             (function(){
               if (window.__x3hubPoly) return; window.__x3hubPoly = true;
+              // Trusted Types pass-through. This was deliberately left out
+              // while nothing injected DOM — relaxing a defence the page
+              // asked for buys nothing if you are not going to use it. The
+              // page agent DOES assign innerHTML, so on any site sending
+              // require-trusted-types-for 'script' it dies at init without
+              // this. Kept as narrow as it can be: forwards the string
+              // unchanged, and never runs if the page installed its own.
+              try{
+                if (window.trustedTypes && window.trustedTypes.createPolicy && !window.trustedTypes.defaultPolicy){
+                  window.trustedTypes.createPolicy('default', {
+                    createHTML: function(s){ return s; },
+                    createScript: function(s){ return s; },
+                    createScriptURL: function(s){ return s; }
+                  });
+                }
+              }catch(e){}
               function def(o,n,f){ try{ if(!o[n]) Object.defineProperty(o,n,{value:f,writable:true,configurable:true}); }catch(e){} }
               try{ Object.defineProperty(navigator,'webdriver',{get:function(){return false;},configurable:true}); }catch(e){}
               try{

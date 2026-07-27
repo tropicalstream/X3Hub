@@ -294,6 +294,13 @@ class HudPinBoardController(
         browserWindows.getOrPut(pin.id) {
             BrowserWindowView(activity).also { w ->
                 w.onExitRequested = { forceCursorVisible() }
+                // BEFORE loadUrl, always. addJavascriptInterface only takes
+                // effect on the next navigation, so attaching the agent's
+                // bridge lazily (on the first double-tap, with the page long
+                // since loaded) leaves the agent running against a bridge
+                // that does not exist in the document — it initialises, plans,
+                // then dies on "X3Bridge is not defined".
+                onBrowserWindowCreated?.invoke(w)
                 w.maxSizeProvider = {
                     val z = computeZone()
                     Pair(z.right - z.left, z.bottom - z.top)
@@ -301,6 +308,9 @@ class HudPinBoardController(
                 if (pin.payload.isNotBlank()) w.loadUrl(pin.payload)
             }
         }
+
+    /** Called once per new window, before its first load. */
+    var onBrowserWindowCreated: ((BrowserWindowView) -> Unit)? = null
 
     /** The window under a screen point, if any — for click/gesture routing. */
     fun browserWindowAt(screenX: Float, screenY: Float): BrowserWindowView? =

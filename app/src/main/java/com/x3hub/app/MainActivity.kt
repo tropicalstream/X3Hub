@@ -43,7 +43,7 @@ import kotlinx.coroutines.launch
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.DimController
-import com.x3hub.app.core.agent.PageAgent
+import com.x3hub.app.core.agent.PageAgentController
 import com.x3hub.app.ui.HubSettingsOverlay
 import com.x3hub.app.ui.HudPinBoardController
 
@@ -110,8 +110,17 @@ class MainActivity : AppCompatActivity() {
     private var rightArmTapStreak = 0
     private var hubSettingsOverlay: HubSettingsOverlay? = null
 
-    /** Double-tap on a window: "tell me about this page". */
-    private val pageAgent by lazy { PageAgent(applicationContext) { msg -> showNotice(msg) } }
+    /**
+     * One page agent per window. Keyed by the window instance because the
+     * agent's state — the running task, the hop budget, the pending LLM
+     * fetches — belongs to a document, and each window has its own.
+     */
+    private val pageAgents = HashMap<BrowserWindowView, PageAgentController>()
+
+    private fun agentFor(window: BrowserWindowView): PageAgentController =
+        pageAgents.getOrPut(window) {
+            PageAgentController(applicationContext, window) { msg -> showNotice(msg) }
+        }
     private var dimController: DimController? = null
     /** The window currently in modify mode, so a swipe knows what to resize. */
     private var modifyingWindow: BrowserWindowView? = null
@@ -730,6 +739,8 @@ class MainActivity : AppCompatActivity() {
         dimController = DimController(root) { dimmed ->
             if (dimmed) setCursorVisible(false)
         }
+
+        hudPinBoardController?.onBrowserWindowCreated = { w -> agentFor(w) }
 
         hubSettingsOverlay = HubSettingsOverlay(
             activity = this,
@@ -1383,7 +1394,7 @@ class MainActivity : AppCompatActivity() {
             val window = controller.browserWindowAt(pt.first, pt.second)
             if (window != null) {
                 Log.i(TAG, "Double-tap on a window — page agent")
-                pageAgent.ask(window)
+                agentFor(window).run(DEFAULT_AGENT_TASK)
                 return
             }
         }
@@ -1585,6 +1596,15 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "X3HubMain"
+
+        /**
+         * What a double-tap asks for when no spoken task was given. Phrased
+         * as a task rather than a question because page-agent is an ACTING
+         * agent: this keeps it on the page it is already on, which is what a
+         * wearer glancing at a small window wants by default.
+         */
+        private const val DEFAULT_AGENT_TASK =
+            "Tell me what is on this page and what I can do here."
 
         /** A pull must cross this much of the pad to count. */
         private const val EDGE_PULL_SPAN_FRACTION = 0.55f
