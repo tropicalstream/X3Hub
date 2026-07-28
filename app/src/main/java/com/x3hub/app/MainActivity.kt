@@ -1328,10 +1328,19 @@ class MainActivity : AppCompatActivity() {
      * True while a window has the input and is not being moved/resized.
      * Modify mode is excluded because there the sideways swipe is the
      * resize gesture, and both cannot claim the same slide.
+     *
+     * The on-screen keyboard is excluded for a blunter reason: its keys are
+     * reached by pointing at them, so if the page kept the slide the cursor
+     * would stay frozen wherever the field happened to be and NO key would
+     * ever be reachable. The window stays active throughout (that is what
+     * keeps the field focused and the dim pull suppressed) — only the
+     * cursor freeze lifts. Scrolling the page therefore means putting the
+     * keyboard away first, which is a tap above it.
      */
     private fun activeWindowOwnsGestures(): Boolean {
         val c = hudPinBoardController ?: return false
         if (c.isInModifyMode()) return false
+        if (keyboardView?.visibility == View.VISIBLE) return false
         return c.browserWindows().any { it.isActive }
     }
 
@@ -1454,6 +1463,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun moveCursorBy(dx: Float, dy: Float) {
+        // Aiming at a key IS using the keyboard. Only key presses used to
+        // reset the idle timer, so hunting for a letter by sliding — which
+        // is the whole interaction on a trackpad — could time the keyboard
+        // out from under the wearer mid-word.
+        if (keyboardView?.visibility == View.VISIBLE) resetKeyboardHideTimer()
         val container = findViewById<View?>(R.id.mainContainer) ?: return
         val maxW = (container.width.takeIf { it > 0 } ?: 640).toFloat()
         val maxH = (container.height.takeIf { it > 0 } ?: 480).toFloat()
@@ -1856,10 +1870,12 @@ class MainActivity : AppCompatActivity() {
             // Already active: this one is for the page.
             if (forwardClickToWindow(window, pt.first, pt.second)) return
         } else if (!modalUp) {
-            // Clicking away from an active window releases it, which is what
-            // makes the hub feel like it owns the cursor again without needing
-            // a deliberate exit gesture every time. Taps that land on a modal
-            // panel are not "away" — they are not about the window at all.
+            // Clicking away from an active window releases it. Reachable only
+            // while the keyboard is up (the one time the cursor can leave an
+            // active window) or when the cursor was already outside it —
+            // otherwise the active window owns the slide and the cursor never
+            // gets out, and triple-tap is the deliberate exit. Taps that land
+            // on a modal panel are not "away": they are not about the window.
             hudPinBoardController?.browserWindows()?.forEach { it.deactivate() }
         }
 
