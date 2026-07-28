@@ -62,7 +62,10 @@ class GeminiLiveClient(
                 "'what does this say' / 'describe this' style questions about the real world.\n" +
                 "- camera_action: save a photo of what the camera sees (action=save_photo).\n" +
                 "- hud_pin: manage the HUD pin board — post-it notes, pictures, and live " +
-                "auto-refreshing info cards placed on the display.\n" +
+                "auto-refreshing info cards placed on the display. Pin ONLY when asked to " +
+                "pin/watch/keep something there. Answering a question NEVER requires a pin: " +
+                "the wearer looks through this display all day and did not ask you to put " +
+                "anything in front of their eyes.\n" +
                 "- assistant_memory: PERSISTENT MEMORY and CUSTOM INSTRUCTIONS. When the user " +
                 "says 'remember …' or states a clearly durable personal fact or preference " +
                 "(their name, home city, dietary needs, 'I always …'), call action=remember " +
@@ -650,16 +653,22 @@ class GeminiLiveClient(
                 "Manage the user's HUD pin board — small pinned items shown on the heads-up " +
                     "display under the clock strip: post-it notes, pictures, and live " +
                     "auto-refreshing info cards. " +
+                    "NEVER pin anything the user did not ask to have pinned. " +
                     "Use when the user says 'make a note', 'pin/post/add ... to my HUD', " +
                     "'put that on my HUD', 'remove the ... pin', 'what's pinned', 'clear my pins'. " +
                     "Actions: " +
                     "add_note — pin a post-it note; pass the note body in 'text'. " +
                     "add_picture — pin a picture; source='screen' captures what the camera " +
                     "currently sees (e.g. 'pin that picture of a cat'), or pass an https image URL. " +
-                    "add_live — pin a LIVE card that auto-refreshes: sports scores, news topics, " +
-                    "headlines, weather, prices — ANY watchable info. Pass the watch request in " +
-                    "'query' (e.g. 'Warriors score', 'top AI headline'); optional 'interval_minutes' " +
-                    "(default 5). Use add_live ONLY for information that CHANGES over time. " +
+                    "add_live — pin a LIVE card that auto-refreshes: sports scores, news " +
+                    "topics, headlines, weather, prices. Pass the watch request in 'query' " +
+                    "(e.g. 'Warriors score', 'top AI headline'); optional 'interval_minutes' " +
+                    "(default 5). " +
+                    "ONLY when the user EXPLICITLY asks to pin, watch, track or keep " +
+                    "something on the display. A plain question — 'what's the weather', " +
+                    "'what's the score' — asks for an ANSWER, not a pin: answer it and pin " +
+                    "NOTHING. Pinning something they merely asked about clutters the display " +
+                    "they have to look through all day, and they did not ask for it. " +
                     "remove — delete a pin by its (approximate) label. list — say what's pinned. " +
                     "clear — remove all pins. " +
                     "Moving and deleting pins is ALSO possible by hand: the user double-taps a pin " +

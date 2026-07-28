@@ -237,6 +237,72 @@ class BrowserWindowView @JvmOverloads constructor(
         edgeScrollVy = 0f
     }
 
+    // ── Resume-from-snapshot ─────────────────────────────────────────
+    //
+    // A restarted app used to reload every window from the network, so the
+    // board came back as a row of empty frames that filled in one by one
+    // over several seconds — and any page the wearer had navigated to was
+    // replaced by whatever the window was first opened on. Showing the last
+    // still instead makes the restart look like nothing happened, and the
+    // real page is fetched only when they actually use the window.
+
+    private var snapshotView: android.widget.ImageView? = null
+
+    /** URL to load when this window is first activated, if deferred. */
+    private var deferredUrl: String? = null
+
+    val isShowingSnapshot: Boolean get() = snapshotView != null
+
+    /**
+     * Put [path] on screen as this window's contents and DON'T load [url]
+     * until the wearer touches the window. Falls back to loading straight
+     * away if the still cannot be decoded — a missing file must not leave a
+     * permanently blank window.
+     */
+    fun showSnapshotUntilUsed(path: String, url: String) {
+        val bmp = runCatching { android.graphics.BitmapFactory.decodeFile(path) }.getOrNull()
+        if (bmp == null) {
+            Log.w(TAG, "snapshot unreadable, loading live: $path")
+            loadUrl(url)
+            return
+        }
+        deferredUrl = url
+        val iv = android.widget.ImageView(context)
+        iv.scaleType = android.widget.ImageView.ScaleType.FIT_START
+        iv.setImageBitmap(bmp)
+        iv.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+        // Not clickable: the tap must reach the window as usual so the
+        // normal activate path runs and swaps this out.
+        iv.isClickable = false
+        addView(iv)
+        snapshotView = iv
+    }
+
+    /** Load the real page and take the still down once it has painted. */
+    private fun wakeFromSnapshot() {
+        val url = deferredUrl ?: return
+        deferredUrl = null
+        Log.i(TAG, "waking window from snapshot -> $url")
+        // Drop the still only when the page has actually rendered, or the
+        // window flashes empty between the two.
+        val previous = onPageFinishedListener
+        onPageFinishedListener = { finishedUrl ->
+            clearSnapshot()
+            onPageFinishedListener = previous
+            previous?.invoke(finishedUrl)
+        }
+        loadUrl(url)
+    }
+
+    private fun clearSnapshot() {
+        val iv = snapshotView ?: return
+        snapshotView = null
+        runCatching {
+            removeView(iv)
+            (iv.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap?.recycle()
+        }
+    }
+
     /** The page's own title, or null before the first load completes. */
     val pageTitle: String? get() = webView.title?.takeIf { it.isNotBlank() }
 
@@ -635,6 +701,9 @@ class BrowserWindowView @JvmOverloads constructor(
 
     /** One single click on the window. Idempotent. */
     fun activate() {
+        // Even if already active — a wearer clicking a still expects it to
+        // come alive, and an early return would leave a dead picture.
+        wakeFromSnapshot()
         if (isActive && !isModifying) return
         isModifying = false
         isActive = true

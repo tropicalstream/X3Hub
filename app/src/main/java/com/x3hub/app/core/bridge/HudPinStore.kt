@@ -114,7 +114,22 @@ object HudPinStore {
          * Defaulted so pins persisted before countdowns existed still
          * parse; 0 = no deadline.
          */
-        val dueAtMs: Long = 0L
+        val dueAtMs: Long = 0L,
+        // ── browser-window resume (TYPE_BROWSER only) ──
+        /**
+         * Where the window had actually navigated TO, which is usually not
+         * [payload]: payload is where it was first opened, and the wearer
+         * then followed links. Restoring payload sends them back to a search
+         * page they left ten minutes ago.
+         */
+        val lastUrl: String? = null,
+        /**
+         * Absolute path to a still of the page as it last looked. Shown
+         * immediately on restart so the board comes back looking the way it
+         * was left, instead of flashing empty frames while the network
+         * re-fetches every window.
+         */
+        val snapshotPath: String? = null
     ) {
         fun toJson(): JSONObject = JSONObject()
             .put("id", id)
@@ -131,6 +146,8 @@ object HudPinStore {
             .put("intervalSec", intervalSec)
             .put("stale", stale)
             .put("dueAtMs", dueAtMs)
+            .put("lastUrl", lastUrl ?: JSONObject.NULL)
+            .put("snapshotPath", snapshotPath ?: JSONObject.NULL)
 
         companion object {
             fun fromJson(o: JSONObject): HudPin? {
@@ -153,7 +170,10 @@ object HudPinStore {
                     updatedAt = o.optLong("updatedAt", 0L),
                     intervalSec = o.optInt("intervalSec", 0),
                     stale = o.optBoolean("stale", false),
-                    dueAtMs = o.optLong("dueAtMs", 0L)
+                    dueAtMs = o.optLong("dueAtMs", 0L),
+                    lastUrl = o.optString("lastUrl").takeIf { it.isNotBlank() && it != "null" },
+                    snapshotPath = o.optString("snapshotPath")
+                        .takeIf { it.isNotBlank() && it != "null" }
                 )
             }
         }
@@ -226,6 +246,34 @@ object HudPinStore {
     }
 
     /** Remove by exact id. Returns true when something was removed. */
+    /**
+     * Record where a browser window had got to, and what it looked like.
+     *
+     * Written as the app goes away, so the next start can put the board back
+     * as the wearer left it. Deletes the previous still — nothing else in
+     * this store cleans up files, and a snapshot per window per launch would
+     * accumulate forever.
+     */
+    @Synchronized
+    fun updateBrowserResume(id: String, lastUrl: String?, snapshotPath: String?): Boolean {
+        val list = all().toMutableList()
+        val i = list.indexOfFirst { it.id == id }
+        if (i < 0) return false
+        val old = list[i]
+        if (old.snapshotPath != null && old.snapshotPath != snapshotPath) {
+            runCatching { java.io.File(old.snapshotPath).delete() }
+        }
+        list[i] = old.copy(
+            lastUrl = lastUrl ?: old.lastUrl,
+            snapshotPath = snapshotPath ?: old.snapshotPath
+        )
+        cache = list
+        persist(list)
+        // Deliberately NOT notifying: this runs while the app is going away,
+        // and a store notification would rebuild the whole board mid-teardown.
+        return true
+    }
+
     fun remove(id: String): Boolean {
         val removed: Boolean
         synchronized(lock) {

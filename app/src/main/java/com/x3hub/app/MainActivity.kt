@@ -813,7 +813,45 @@ class MainActivity : AppCompatActivity() {
         // obvious call and is exactly wrong here: it is process-global, so one
         // window pausing would freeze every other window's JavaScript too.
         stopEdgeScroll()
+        saveBrowserWindowsForResume()
         hudPinBoardController?.browserWindows()?.forEach { it.onHostPause() }
+    }
+
+    /**
+     * Photograph every open window and remember where it had got to.
+     *
+     * Runs as the app goes away so the next start can put the board back
+     * looking as it was left, rather than re-fetching every page over the
+     * network and showing empty frames while it happens. Best-effort by
+     * design: a window that will not capture simply resumes by loading, and
+     * onPause is not the place to throw.
+     */
+    private fun saveBrowserWindowsForResume() {
+        val controller = hudPinBoardController ?: return
+        val pinsById = runCatching { HudPinStore.all().associateBy { it.id } }.getOrNull() ?: return
+        controller.browserWindowEntries().forEach { (pinId, window) ->
+            if (pinsById[pinId]?.type != BrowserTool.TYPE_BROWSER) return@forEach
+            // A window still showing a previous still has nothing new to
+            // photograph, and capturing it would overwrite a good image
+            // with a picture of itself.
+            if (window.isShowingSnapshot) return@forEach
+            val url = window.currentUrl?.takeIf { it.isNotBlank() }
+            val path = runCatching {
+                window.captureThumbnail(maxWidth = window.windowWidth)?.let { bmp ->
+                    val dir = java.io.File(filesDir, "window_snapshots").apply { mkdirs() }
+                    val f = java.io.File(dir, "win_${pinId}_${System.currentTimeMillis()}.jpg")
+                    java.io.FileOutputStream(f).use { out ->
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+                    }
+                    bmp.recycle()
+                    f.absolutePath
+                }
+            }.onFailure { Log.w(TAG, "window snapshot failed: ${it.message}") }.getOrNull()
+            if (url != null || path != null) {
+                HudPinStore.updateBrowserResume(pinId, url, path)
+                Log.i(TAG, "saved resume for $pinId url=$url snap=${path != null}")
+            }
+        }
     }
 
     override fun onResume() {

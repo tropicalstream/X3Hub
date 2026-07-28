@@ -318,7 +318,17 @@ class HudPinBoardController(
                     val z = computeZone()
                     Pair(z.right - z.left, z.bottom - z.top)
                 }
-                if (pin.payload.isNotBlank()) w.loadUrl(pin.payload)
+                // Resume where the wearer actually was, not where the
+                // window was first opened — they followed links, and
+                // sending them back to the original URL loses that.
+                val resumeUrl = pin.lastUrl?.takeIf { it.isNotBlank() }
+                    ?: pin.payload.takeIf { it.isNotBlank() }
+                val snap = pin.snapshotPath?.takeIf { java.io.File(it).exists() }
+                when {
+                    resumeUrl == null -> Unit
+                    snap != null -> w.showSnapshotUntilUsed(snap, resumeUrl)
+                    else -> w.loadUrl(resumeUrl)
+                }
             }
         }
 
@@ -334,6 +344,10 @@ class HudPinBoardController(
 
     /** Every live window, for lifecycle forwarding and "deactivate the others". */
     fun browserWindows(): Collection<BrowserWindowView> = browserWindows.values
+
+    /** Windows with their pin ids — the host needs the id to persist state. */
+    fun browserWindowEntries(): List<Pair<String, BrowserWindowView>> =
+        browserWindows.entries.map { it.key to it.value }
 
     /** The pin id backing a window, so a caller can close it via the store. */
     fun pinIdFor(window: BrowserWindowView): String? =
