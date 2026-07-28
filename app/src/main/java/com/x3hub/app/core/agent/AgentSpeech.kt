@@ -41,12 +41,18 @@ object AgentSpeech {
      * wobble, and on glasses the answer must still be spoken.
      */
     private val TTS_MODELS = listOf(
-        "gemini-3.1-flash-tts-preview",
-        "gemini-2.5-flash-preview-tts"
+        // Ordered by measured latency, not by version. For the same 223-char
+        // answer 2.5-flash took 7.9s against 3.1-flash's 14.7s for near
+        // identical audio — and the wearer is standing there waiting.
+        "gemini-2.5-flash-preview-tts",
+        "gemini-3.1-flash-tts-preview"
     )
     private const val TTS_VOICE = "Kore"
     /** Both models return raw 16-bit mono PCM at this rate — no container. */
     private const val SAMPLE_RATE = 24_000
+    private const val BYTES_PER_FRAME = 2          // 16-bit mono
+    /** Slack over the clip's own length before we stop waiting for it. */
+    private const val DRAIN_GRACE_MS = 3_000L
 
     /** Long answers are wanted; endless ones are not. */
     private const val MAX_CHARS = 700
@@ -265,14 +271,30 @@ object AgentSpeech {
             if (n <= 0) break
             off += n
         }
-        if (myGen == generation) {
-            // Let the tail drain before tearing the track down, or the last
-            // word is clipped.
-            Thread.sleep(250)
-            runCatching { t.stop() }
+        // write() returns when the data has been COPIED into the track, not
+        // when it has been heard — and the buffer is sized to hold the whole
+        // answer, so every write returns almost immediately. Sleeping a fixed
+        // 250ms and releasing therefore cut the speech off mid-sentence: it
+        // destroyed the track with ~17s of audio still queued inside it.
+        // Wait for the playback head to actually reach the end instead.
+        val totalFrames = pcmLen / BYTES_PER_FRAME
+        val audioMs = totalFrames * 1000L / SAMPLE_RATE
+        val deadline = System.currentTimeMillis() + audioMs + DRAIN_GRACE_MS
+        while (myGen == generation &&
+            t.playbackHeadPosition < totalFrames &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Thread.sleep(40)
         }
+        val played = t.playbackHeadPosition
+        if (myGen == generation) runCatching { t.stop() }
         runCatching { t.release() }
         if (track === t) track = null
+        Log.i(
+            TAG,
+            "spoke ${played * 1000L / SAMPLE_RATE}ms of ${audioMs}ms" +
+                if (played < totalFrames) " (CUT SHORT)" else ""
+        )
     }
 
 }
