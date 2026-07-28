@@ -145,7 +145,54 @@ class HudPinBoardController(
     // Rendering
     // ------------------------------------------------------------------
 
+    /**
+     * True when nothing about the board's SHAPE changed — same pins, same
+     * order, same sizes and positions — and only card text moved.
+     */
+    private fun onlyContentChanged(next: List<HudPin>): Boolean {
+        val prev = pinsSnapshot
+        if (prev.size != next.size || pinViews.size != prev.size) return false
+        return prev.indices.all { i ->
+            val a = prev[i]
+            val b = next[i]
+            a.id == b.id && a.type == b.type && a.label == b.label &&
+                a.payload == b.payload && a.customX == b.customX &&
+                a.customY == b.customY && a.snapshotPath == b.snapshotPath
+        }
+    }
+
     private fun render(pins: List<HudPin>) {
+        // A live card refreshing its text used to rebuild the ENTIRE board:
+        // every view destroyed and recreated, browser WebViews included. With
+        // two live cards on a five-minute cadence that is a full teardown
+        // several times an hour, and for the frame it takes to lay out again
+        // every pin measures 0x0 — which is how a window came to be
+        // photographed as nothing at all. Text-only updates now redraw just
+        // the cards whose text moved.
+        if (onlyContentChanged(pins)) {
+            val previous = pinsSnapshot
+            pinsSnapshot = pins
+            pins.forEachIndexed { i, pin ->
+                if (previous[i].content == pin.content &&
+                    previous[i].stale == pin.stale &&
+                    previous[i].statusNote == pin.statusNote
+                ) return@forEachIndexed
+                val container = pinViews[pin.id] ?: return@forEachIndexed
+                val rebuilt = when (pin.type) {
+                    HudPinStore.TYPE_LIVE -> buildLiveContent(pin)
+                    else -> return@forEachIndexed
+                }
+                container.removeAllViews()
+                rebuilt.layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+                rebuilt.isClickable = false
+                rebuilt.isFocusable = false
+                container.addView(rebuilt)
+            }
+            return
+        }
         pinsSnapshot = pins
         // The highlight and chip belong to view instances that are about to
         // be destroyed, so modify mode has to come down here — but a resize
@@ -344,6 +391,33 @@ class HudPinBoardController(
 
     /** Every live window, for lifecycle forwarding and "deactivate the others". */
     fun browserWindows(): Collection<BrowserWindowView> = browserWindows.values
+
+    /** Dump how the board actually allocated space. Debug builds only. */
+    fun debugDumpLayout() = uiHandler.postDelayed({
+        val z = lastZone
+        android.util.Log.i(
+            "X3HubBoard",
+            "zone=${z?.left},${z?.top} -> ${z?.right},${z?.bottom} " +
+                "(${(z?.right ?: 0) - (z?.left ?: 0)}x${(z?.bottom ?: 0) - (z?.top ?: 0)}) " +
+                "board=${board.width}x${board.height} pins=${pinsSnapshot.size}"
+        )
+        pinsSnapshot.forEach { pin ->
+            val v = pinViews[pin.id]
+            val lp = v?.layoutParams as? FrameLayout.LayoutParams
+            val inZone = if (lp != null && z != null) {
+                lp.leftMargin >= z.left && lp.topMargin >= z.top &&
+                    lp.leftMargin + (lp.width) <= z.right &&
+                    lp.topMargin + (lp.height) <= z.bottom
+            } else false
+            android.util.Log.i(
+                "X3HubBoard",
+                "  ${pin.type.padEnd(9)} '${pin.label.take(18)}' " +
+                    "box=${lp?.width}x${lp?.height} at=${lp?.leftMargin},${lp?.topMargin} " +
+                    "measured=${v?.width}x${v?.height} laidOut=${v?.isLaidOut} " +
+                    "attached=${v?.parent != null} fitsInZone=$inZone"
+            )
+        }
+    }, 1500L)
 
     /** Windows with their pin ids — the host needs the id to persist state. */
     fun browserWindowEntries(): List<Pair<String, BrowserWindowView>> =

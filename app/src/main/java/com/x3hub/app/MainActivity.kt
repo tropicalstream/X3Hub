@@ -850,6 +850,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     return
                 }
+                intent?.getStringExtra("board")?.let {
+                    hudPinBoardController?.debugDumpLayout()
+                    return
+                }
                 intent?.getStringExtra("readpage")?.let {
                     // The exact path the assistant uses for "what is on my
                     // HUD" — the one that returned nothing on a restored

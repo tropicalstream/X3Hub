@@ -378,31 +378,42 @@ class HubSettingsOverlay(
      * wearer meant, and a mis-tap onto the wrong key's field is worse than
      * an oversized target.
      */
+    /**
+     * One key, on one line.
+     *
+     * These used to be tall stacked cards — title, purpose, status, a
+     * spacer and a "tap to change" chip — costing 138px of a 480px panel
+     * for three things that are set once and then never touched. The
+     * purpose text and the chip are gone: the detail page explains itself
+     * when opened, and the whole card has always been the tap target.
+     * The height freed goes to bookmarks, which are used constantly.
+     */
     private fun buildCard(slot: KeySlot): View {
         val card = LinearLayout(activity)
-        card.orientation = LinearLayout.VERTICAL
+        card.orientation = LinearLayout.HORIZONTAL
+        card.gravity = Gravity.CENTER_VERTICAL
         card.layoutParams = LinearLayout.LayoutParams(0, MATCH, 1f).apply {
-            leftMargin = 4
-            rightMargin = 4
+            leftMargin = 3
+            rightMargin = 3
         }
-        card.setPadding(8, 6, 8, 6)
+        card.setPadding(8, 4, 8, 4)
         card.background = boxBg(fill = 0x14FFFFFF, stroke = 0x66FFFFFF, strokeW = 1)
         card.isClickable = true
         card.setOnClickListener { openDetail(slot) }
 
-        card.addView(label(slot.title, 16f, ACCENT, bold = true))
-        card.addView(label(slot.purpose, 14f, DIM).apply { maxLines = 2 })
-
-        val status = label("", 14f, Color.WHITE, mono = true)
-        status.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 4 }
+        card.addView(
+            label(slot.title, 15f, ACCENT, bold = true).apply {
+                layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply { rightMargin = 6 }
+                maxLines = 1
+            }
+        )
+        val status = label("", 13f, Color.WHITE, mono = true).apply {
+            layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
         cardStatusViews[slot.id] = status
         card.addView(status)
-
-        val spacer = View(activity)
-        spacer.layoutParams = LinearLayout.LayoutParams(MATCH, 0, 1f)
-        card.addView(spacer)
-
-        card.addView(label("tap to change  ›", 14f, ACCENT))
         return card
     }
 
@@ -955,8 +966,8 @@ class HubSettingsOverlay(
         /** Minimum touch target; the cursor is a trackpad estimate, not a finger. */
         private const val TAP_MIN = 44
         /** Rows that fit the panel's remaining height without scrolling. */
-        private const val BOOKMARK_ROWS = 4
-        private const val CARD_H = 138
+        private const val BOOKMARK_ROWS = 6
+        private const val CARD_H = 34
 
         private const val ACCENT = 0xFF7FDBFF.toInt()   // HUD cyan
         private const val OK = 0xFF9FE6B0.toInt()
