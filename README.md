@@ -31,9 +31,9 @@ foreground Service, everything under the HUD strip.
 - **Floating browser windows** — up to 3 at once, each a real WebView pinned
   to the HUD board. Portrait 3:4 size ladder (128×170 up to 323×430),
   resizable and movable by hand.
-- **Ad blocking** — 93,000+ domain blocklist, plus site-specific chrome
-  filters (promo banners, "get our app" interstitials) and image-page
-  auto-framing for a picture that fills the window.
+- **Site chrome filtering** — suppresses promo banners and "get our app"
+  interstitials, and auto-frames an image page so the picture fills the
+  window.
 - **Page agent** — an autonomous in-page agent (click, type, scroll, search)
   that takes a *spoken* task once a window is active: "play the first
   result," "search this page for X," "log in."
@@ -206,8 +206,8 @@ MainActivity                     — HUD strip, cursor + gestures, tap
 ui/BinocularSbsLayout             — 640×480 logical viewport drawn twice (L+R)
 ui/BrowserWindowView              — one floating WebView: activate/modify
                                     state machine, resize ladder, edge
-                                    scrolling, ad-block, page-image fit,
-                                    thumbnail capture, resume-from-snapshot
+                                    scrolling, page-image fit, thumbnail
+                                    capture, resume-from-snapshot
 ui/HudPinBoardController          — notes/pictures/live cards/bookmarks/
                                     browser windows on the pin board; flow-
                                     grid layout; move/delete via modify mode
@@ -231,7 +231,6 @@ core/tools/…                      — BrowserTool, BookmarkTool, PageVision,
                                     HudPinTool, CameraTool, ReminderTool, …
 core/bridge/…                     — HudPinStore, BookmarkStore, BookmarkBridge,
                                     WindowBridge, HudStateBridge, VoiceServiceApi
-core/web/AdBlock                  — 93k-domain blocklist + request interception
 core/config/ApiKeyStore           — resolves adb-pushed keys (Gemini/Groq/Cerebras)
 ```
 
