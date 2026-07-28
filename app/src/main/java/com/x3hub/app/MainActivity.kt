@@ -197,7 +197,10 @@ class MainActivity : AppCompatActivity() {
      */
     private fun dispatchPageCommand(text: String, window: BrowserWindowView) {
         when (val outcome = PageCommands.route(text, window)) {
-            is PageCommands.Outcome.Handled -> showNotice(outcome.notice)
+            is PageCommands.Outcome.Handled -> {
+                showNotice(outcome.notice)
+                releasePageCommandToCursor(window)
+            }
             is PageCommands.Outcome.StopAgent -> {
                 pageAgents[window]?.stop()
                 AgentSpeech.stop()
@@ -211,6 +214,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * A native page command is a finished, one-shot interaction. Leaving the
+     * window ACTIVE after it completes makes the next physical pad slide a
+     * page drag and looks exactly like a dead pointer. If a programmatic
+     * in-page search briefly raised our keyboard, use its normal dismissal
+     * path; otherwise return the touchpad directly to the hub cursor.
+     */
+    private fun releasePageCommandToCursor(window: BrowserWindowView) {
+        if (keyboardOwner === window && keyboardView?.visibility == View.VISIBLE) {
+            hideOnScreenKeyboard()
+            return
+        }
+        window.deactivate()
+        if (draggingWindow === window) finishWindowDrag(cancelled = true)
+        setCursorVisible(true)
+        Log.i(TAG, "Page command complete — browser released and cursor owns touchpad")
+    }
+
     /** Drive the page's own search box; fall back to the web if it has none. */
     private fun searchInPage(query: String, window: BrowserWindowView, retried: Boolean) {
         // This is about to call el.focus() on the page's own search box, and a
@@ -220,8 +241,10 @@ class MainActivity : AppCompatActivity() {
         suppressImeFor(2500L)
         window.evaluateJavascript(PageCommands.searchInPageJs(query)) { result ->
             when {
-                result != null && result.contains("ok") ->
+                result != null && result.contains("ok") -> {
                     showNotice("Searching this site for ${query.take(32)}")
+                    releasePageCommandToCursor(window)
+                }
                 // The box was collapsed behind a magnifier and we just clicked
                 // it open; give the DOM a moment, then fill it in.
                 result != null && result.contains("opened") && !retried ->
@@ -230,6 +253,7 @@ class MainActivity : AppCompatActivity() {
                     // No search box here — a web search beats doing nothing.
                     window.loadUrl(PageCommands.searchUrl(query, google = false))
                     showNotice("Searching the web for ${query.take(32)}")
+                    releasePageCommandToCursor(window)
                 }
             }
         }
@@ -290,6 +314,7 @@ class MainActivity : AppCompatActivity() {
         kb.bringToFront()
         setCursorVisible(true)
         resetKeyboardHideTimer()
+        Log.i(TAG, "Keyboard shown — cursor owns touchpad while page field stays focused")
     }
 
     /** Idle keyboards are just lost display; 20s of no key is idle. */
@@ -300,9 +325,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun hideOnScreenKeyboard() {
         uiHandler.removeCallbacks(keyboardHideRunnable)
+        val owner = keyboardOwner
         keyboardView?.visibility = View.GONE
-        keyboardOwner?.defocusField()
         keyboardOwner = null
+        owner?.defocusField()
+
+        // Keyboard dismissal is also the input handoff back to the hub. If the
+        // page stays ACTIVE, activeWindowOwnsGestures() immediately takes the
+        // next slide away from the cursor and turns it into a page drag. That
+        // feels like the pointer died at exactly the moment the keyboard went
+        // away. Releasing only the keyboard's owner keeps other windows
+        // untouched and makes every dismissal path (hide key, Enter, timeout,
+        // or a tap above the keyboard) end in the same usable state.
+        owner?.deactivate()
+        finishWindowDrag(cancelled = true)
+        setCursorVisible(true)
+        Log.i(TAG, "Keyboard hidden — browser released and cursor owns touchpad")
     }
 
     private val keyboardActions = object : CustomKeyboardView.OnKeyboardActionListener {
@@ -1833,6 +1871,7 @@ class MainActivity : AppCompatActivity() {
             }
             // Tapping above the keyboard puts it away.
             hideOnScreenKeyboard()
+            return
         }
 
         // …and modify mode outranks BOTH. The board consumes the next tap to

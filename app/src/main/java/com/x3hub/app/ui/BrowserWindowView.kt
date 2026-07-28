@@ -487,6 +487,7 @@ class BrowserWindowView @JvmOverloads constructor(
             ) {
                 super.onPageStarted(view, url, favicon)
                 injectPolyfills()
+                injectSiteChromeFilters()
                 injectInputHooks()
                 onPageStartedListener?.invoke(url)
             }
@@ -503,6 +504,7 @@ class BrowserWindowView @JvmOverloads constructor(
                 // parse finds the shims, and at finish for anything the
                 // document replaced in between.
                 injectPolyfills()
+                injectSiteChromeFilters()
                 injectInputHooks()
                 restoreScrollAfterResize()
                 if (BuildConfig.DEBUG) {
@@ -530,6 +532,11 @@ class BrowserWindowView @JvmOverloads constructor(
      */
     private fun injectPolyfills() {
         runCatching { webView.evaluateJavascript(POLYFILL_JS, null) }
+    }
+
+    /** Remove site-owned install promos that obscure most of a glasses window. */
+    private fun injectSiteChromeFilters() {
+        runCatching { webView.evaluateJavascript(SITE_CHROME_FILTER_JS, null) }
     }
 
     // ------------------------------------------------------------------
@@ -848,6 +855,23 @@ class BrowserWindowView @JvmOverloads constructor(
         private const val MODERN_UA =
             "Mozilla/5.0 (Linux; Android 12; RayNeo X3 Pro) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+
+        private val SITE_CHROME_FILTER_JS = """
+            (function(){
+              if (!/(^|\.)duckduckgo\.com${'$'}/i.test(location.hostname)) return;
+              var id = 'x3hub-site-chrome-filter';
+              if (document.getElementById(id)) return;
+              var style = document.createElement('style');
+              style.id = id;
+              // DuckDuckGo fills this React host after page load with the
+              // persistent blue "Try the DuckDuckGo browser" promo. The
+              // current mobile template marks the button with serp-atb-btn;
+              // the empty React host covers the alternate template.
+              style.textContent = '#react-browser-update-info,' +
+                '[data-testid="serp-atb-btn"]{display:none!important}';
+              (document.head || document.documentElement).appendChild(style);
+            })();
+        """.trimIndent()
 
         private val POLYFILL_JS = """
             (function(){
