@@ -349,20 +349,33 @@ class BrowserWindowView @JvmOverloads constructor(
      *
      * Not the same as WebView.getUrl() on a single-page app. Tapping a video
      * on YouTube, or a day in Google Calendar, changes the document through
-     * the history API — and what gets bookmarked from getUrl() can still be
-     * the feed the wearer arrived on rather than the thing they were looking
-     * at. A bookmark that reopens "the site" instead of "this" is not a
-     * bookmark. Reads location.href, falling back to getUrl().
+     * the history API, so a bookmark must read location.href.
+     *
+     * A YouTube feed needs one more distinction: the captured still shows a
+     * particular video card, but the feed URL is dynamic and can show a
+     * completely different card when reopened. For feed/list pages the
+     * largest visible video thumbnail is what the wearer is looking at, so
+     * its watch/short/live link becomes the bookmark target. Content pages
+     * and every non-YouTube page retain their own URL.
      */
-    fun resolveLiveUrl(callback: (String?) -> Unit) {
+    fun resolveBookmarkUrl(callback: (String?) -> Unit) {
         deferredUrl?.let { callback(it); return }
         val fallback = webView.url?.takeIf { it.isNotBlank() && it != "about:blank" }
         runCatching {
-            webView.evaluateJavascript("location.href") { raw ->
-                val fromPage = raw
-                    ?.trim()?.removeSurrounding("\"")
-                    ?.takeIf { it.isNotBlank() && it != "null" && it != "about:blank" }
-                callback(fromPage ?: fallback)
+            webView.evaluateJavascript(BOOKMARK_TARGET_JS) { raw ->
+                // evaluateJavascript returns a JSON string literal. Decoding
+                // it matters for URLs whose query contains escaped text.
+                val fromPage = runCatching {
+                    if (raw == null || raw == "null") null
+                    else org.json.JSONTokener(raw).nextValue() as? String
+                }.getOrNull()?.takeIf {
+                    it.isNotBlank() && it != "about:blank"
+                }
+                val resolved = fromPage ?: fallback
+                if (BuildConfig.DEBUG) {
+                    Log.i(TAG, "bookmark target webView=$fallback resolved=$resolved")
+                }
+                callback(resolved)
             }
         }.onFailure { callback(fallback) }
     }
@@ -1109,6 +1122,81 @@ class BrowserWindowView @JvmOverloads constructor(
 
         /** How long a tool waits for a woken page before using what it has. */
         private const val WAKE_TIMEOUT_MS = 8_000L
+
+        /**
+         * Return the URL represented by a bookmark still.
+         *
+         * Most stills represent the document and return location.href. A
+         * YouTube home/search/feed still instead represents the dominant
+         * video card visible inside that document. Saving only the feed URL
+         * makes the thumbnail lie as soon as YouTube refreshes its feed.
+         *
+         * The selection is deliberately narrow:
+         *   - only YouTube hosts;
+         *   - only anchors to watch/shorts/live content;
+         *   - only image pixels actually intersecting the viewport.
+         *
+         * Therefore an article containing a linked image, or even a YouTube
+         * watch page containing recommendations, keeps its own page URL.
+         */
+        private val BOOKMARK_TARGET_JS = """
+            (function(){
+              try {
+                var page = location.href;
+                var host = (location.hostname || '').toLowerCase();
+                var youtube = host === 'youtube.com' ||
+                              host.substring(Math.max(0, host.length - 12)) === '.youtube.com';
+                if (!youtube) return page;
+
+                var pagePath = (location.pathname || '').toLowerCase();
+                if (/^\/(watch|shorts|live)(\/|${'$'})/.test(pagePath)) return page;
+
+                var viewportW = Math.max(
+                  window.innerWidth || 0,
+                  document.documentElement ? document.documentElement.clientWidth : 0
+                );
+                var viewportH = Math.max(
+                  window.innerHeight || 0,
+                  document.documentElement ? document.documentElement.clientHeight : 0
+                );
+                var best = null, bestArea = 0;
+                var images = document.querySelectorAll('a[href] img');
+                for (var i = 0; i < images.length; i++) {
+                  var img = images[i];
+                  var anchor = img.closest ? img.closest('a[href]') : null;
+                  if (!anchor) continue;
+
+                  var target;
+                  try { target = new URL(anchor.href, page); } catch (_) { continue; }
+                  var targetHost = (target.hostname || '').toLowerCase();
+                  var targetYoutube = targetHost === 'youtube.com' ||
+                    targetHost.substring(Math.max(0, targetHost.length - 12)) === '.youtube.com';
+                  if (!targetYoutube) continue;
+                  var targetPath = (target.pathname || '').toLowerCase();
+                  if (!/^\/(watch|shorts|live)(\/|${'$'})/.test(targetPath)) continue;
+
+                  var style = getComputedStyle(img);
+                  if (style.display === 'none' || style.visibility === 'hidden' ||
+                      parseFloat(style.opacity || '1') === 0) continue;
+                  var rect = img.getBoundingClientRect();
+                  var visibleW = Math.max(
+                    0, Math.min(rect.right, viewportW) - Math.max(rect.left, 0)
+                  );
+                  var visibleH = Math.max(
+                    0, Math.min(rect.bottom, viewportH) - Math.max(rect.top, 0)
+                  );
+                  var area = visibleW * visibleH;
+                  if (area > bestArea) {
+                    bestArea = area;
+                    best = target.href;
+                  }
+                }
+                return best || page;
+              } catch (_) {
+                return location.href || null;
+              }
+            })()
+        """.trimIndent()
 
         /**
          * Thumbnail width in px. Twice the ~72px the bookmark pin draws at,

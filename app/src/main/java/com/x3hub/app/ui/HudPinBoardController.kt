@@ -172,6 +172,7 @@ class HudPinBoardController(
         if (onlyContentChanged(pins)) {
             val previous = pinsSnapshot
             pinsSnapshot = pins
+            var needsFullRender = false
             pins.forEachIndexed { i, pin ->
                 if (previous[i].content == pin.content &&
                     previous[i].stale == pin.stale &&
@@ -182,6 +183,19 @@ class HudPinBoardController(
                     HudPinStore.TYPE_LIVE -> buildLiveContent(pin)
                     else -> return@forEachIndexed
                 }
+                // A card's BOX was measured for the text it had. A card that
+                // has just loaded grew from "updating…" to eight lines of
+                // news, and swapping the text into the old box clipped it to
+                // a title with nothing under it. When the new text does not
+                // fit the old box, the whole board has to reflow — the pins
+                // around it were placed against the old size too.
+                val (nw, nh) = measureContent(rebuilt, dp(LIVE_MAX_WIDTH_DP))
+                if (nw != container.layoutParams.width ||
+                    nh != container.layoutParams.height
+                ) {
+                    needsFullRender = true
+                    return@forEachIndexed
+                }
                 container.removeAllViews()
                 rebuilt.layoutParams = FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
@@ -191,7 +205,8 @@ class HudPinBoardController(
                 rebuilt.isFocusable = false
                 container.addView(rebuilt)
             }
-            return
+            if (!needsFullRender) return
+            // fall through and rebuild the board at the new sizes
         }
         pinsSnapshot = pins
         // The highlight and chip belong to view instances that are about to

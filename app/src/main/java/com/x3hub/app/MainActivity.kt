@@ -450,9 +450,10 @@ class MainActivity : AppCompatActivity() {
             // taken there comes back empty — give the page a frame to draw.
             val go = {
                 // Ask the PAGE where it is, not the WebView: on a single-page
-                // app they disagree, and the WebView's answer is the feed the
-                // wearer arrived on rather than what they were looking at.
-                window.resolveLiveUrl { liveUrl -> reply(captureBookmark(window, liveUrl)) }
+                // app they disagree. On a YouTube feed, also bind the still
+                // to the visible video's link — reopening the feed itself
+                // would show a different card beneath the saved picture.
+                window.resolveBookmarkUrl { target -> reply(captureBookmark(window, target)) }
             }
             if (wasAsleep) uiHandler.postDelayed(go, PAINT_SETTLE_MS) else go()
         }
