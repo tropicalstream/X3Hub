@@ -3,10 +3,9 @@ package com.x3hub.app.core.agent
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
 import android.util.Log
-import com.x3hub.app.core.config.KeyFile
+import com.x3hub.app.core.config.ApiKeyStore
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,9 +29,23 @@ import java.util.concurrent.TimeUnit
 object AgentSpeech {
 
     private const val TAG = "X3HubAgentSpeech"
-    private const val TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
-    private const val TTS_MODEL = "canopylabs/orpheus-v1-english"
-    private const val TTS_VOICE = "autumn"
+
+    /**
+     * Gemini rather than Groq's Orpheus, which this used to use. Orpheus is
+     * metered per DAY at 3600 tokens — small enough that a wearer runs it out
+     * in an afternoon, and every answer after that was silent. Gemini shares
+     * the key the assistant already uses, so there is one credential to keep
+     * working instead of two.
+     *
+     * Two models on the same key: a preview endpoint can be withdrawn or
+     * wobble, and on glasses the answer must still be spoken.
+     */
+    private val TTS_MODELS = listOf(
+        "gemini-3.1-flash-tts-preview",
+        "gemini-2.5-flash-preview-tts"
+    )
+    private const val TTS_VOICE = "Kore"
+    /** Both models return raw 16-bit mono PCM at this rate — no container. */
     private const val SAMPLE_RATE = 24_000
 
     /** Long answers are wanted; endless ones are not. */
@@ -53,25 +66,85 @@ object AgentSpeech {
         generation++
         runCatching { track?.pause(); track?.flush(); track?.release() }
         track = null
+        runCatching { deviceTts?.stop() }
     }
 
     fun speak(context: Context, text: String) {
         val clipped = clean(text)
+        Log.i(TAG, "speak() asked for ${clipped.length} chars")
         if (clipped.isEmpty()) return
-        val key = groqKey(context)
-        if (key.isBlank()) {
-            Log.i(TAG, "no Groq key — answer stays on the HUD only")
-            return
-        }
         stop()
         val myGen = ++generation
+        val key = geminiKey(context)
+        if (key.isBlank()) {
+            Log.i(TAG, "no Gemini key — falling back to the device voice")
+            speakOnDevice(context, clipped, myGen)
+            return
+        }
         Thread {
             val wav = runCatching { synth(key, clipped) }.getOrElse {
                 Log.w(TAG, "TTS failed", it); null
-            } ?: return@Thread
+            }
             if (myGen != generation) return@Thread
-            runCatching { play(wav, myGen) }.onFailure { Log.w(TAG, "playback failed", it) }
+            if (wav == null) {
+                // Orpheus is metered per DAY and the allowance is small
+                // (3600 tokens), so on a wearable it runs out mid-afternoon
+                // and every answer after that is silent. Silence is the one
+                // outcome this feature cannot have: the HUD holds about a
+                // line, so an answer that is not spoken is an answer lost.
+                speakOnDevice(context, clipped, myGen)
+                return@Thread
+            }
+            runCatching { play(wav, myGen) }.onFailure {
+                Log.w(TAG, "playback failed", it)
+                speakOnDevice(context, clipped, myGen)
+            }
         }.start()
+    }
+
+    // ── Device voice fallback ────────────────────────────────────────
+    // Android's own engine: worse than Orpheus, always available, and
+    // needs no network — which also makes it the only half of this that
+    // works when the glasses are off Wi-Fi.
+
+    @Volatile private var deviceTts: android.speech.tts.TextToSpeech? = null
+    @Volatile private var deviceTtsReady = false
+
+    private fun speakOnDevice(context: Context, text: String, gen: Int) {
+        val app = context.applicationContext
+        val existing = deviceTts
+        if (existing != null && deviceTtsReady) {
+            if (gen != generation) return
+            utter(existing, text)
+            return
+        }
+        if (existing != null) return   // an init is already in flight
+        val engine = android.speech.tts.TextToSpeech(app) { status ->
+            deviceTtsReady = status == android.speech.tts.TextToSpeech.SUCCESS
+            if (!deviceTtsReady) {
+                Log.w(TAG, "device TTS unavailable (status=$status) — answer stays on the HUD")
+                return@TextToSpeech
+            }
+            val t = deviceTts ?: return@TextToSpeech
+            runCatching {
+                t.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+            }
+            // The answer that triggered the init is only still wanted if
+            // nothing newer has been queued while the engine warmed up.
+            if (gen == generation) utter(t, text)
+        }
+        deviceTts = engine
+    }
+
+    private fun utter(t: android.speech.tts.TextToSpeech, text: String) {
+        runCatching {
+            t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "x3hub-agent")
+        }.onFailure { Log.w(TAG, "device TTS speak failed", it) }
     }
 
     /**
@@ -87,39 +160,78 @@ object AgentSpeech {
             .trim()
             .take(MAX_CHARS)
 
-    private fun groqKey(context: Context): String {
-        KeyFile.resolveFromDir(context.getExternalFilesDir(null), "groq")
-            ?.value?.takeIf { it.isNotBlank() }?.let { return it }
-        return context.getSharedPreferences("x3hub_config", Context.MODE_PRIVATE)
-            .getString("groq_api_key", "").orEmpty().trim()
-    }
+    private fun geminiKey(context: Context): String =
+        ApiKeyStore.resolve(context).orEmpty().trim()
 
     private fun synth(key: String, text: String): ByteArray? {
+        for (model in TTS_MODELS) {
+            val pcm = runCatching { synthWith(model, key, text) }.getOrElse {
+                Log.w(TAG, "TTS $model failed: ${it.message}"); null
+            }
+            if (pcm != null && pcm.isNotEmpty()) {
+                // Success used to log nothing, which made a silent answer
+                // impossible to tell apart from one that never got here.
+                Log.i(TAG, "TTS ok via $model (${pcm.size} pcm bytes)")
+                return pcm
+            }
+        }
+        return null
+    }
+
+    private fun synthWith(model: String, key: String, text: String): ByteArray? {
         val payload = JSONObject()
-            .put("model", TTS_MODEL)
-            .put("voice", TTS_VOICE)
-            .put("input", text)
-            .put("response_format", "wav")
+            .put(
+                "contents",
+                org.json.JSONArray().put(
+                    JSONObject().put("parts", org.json.JSONArray().put(JSONObject().put("text", text)))
+                )
+            )
+            .put(
+                "generationConfig",
+                JSONObject()
+                    .put("responseModalities", org.json.JSONArray().put("AUDIO"))
+                    .put(
+                        "speechConfig",
+                        JSONObject().put(
+                            "voiceConfig",
+                            JSONObject().put(
+                                "prebuiltVoiceConfig",
+                                JSONObject().put("voiceName", TTS_VOICE)
+                            )
+                        )
+                    )
+            )
             .toString()
         val req = Request.Builder()
-            .url(TTS_URL)
-            .header("Authorization", "Bearer $key")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+            // Header auth, not ?key= — the current AQ.* keys 404 on the query
+            // form for generateContent even though it works for listing models.
+            .header("x-goog-api-key", key)
             .post(payload.toRequestBody("application/json".toMediaType()))
             .build()
         http.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                Log.w(TAG, "TTS HTTP ${resp.code}: ${resp.body?.string()?.take(200)}")
+                Log.w(TAG, "TTS $model HTTP ${resp.code}: ${body.take(200)}")
                 return null
             }
-            return resp.body?.bytes()
+            val part = JSONObject(body)
+                .optJSONArray("candidates")?.optJSONObject(0)
+                ?.optJSONObject("content")
+                ?.optJSONArray("parts")?.optJSONObject(0)
+                ?: return null
+            val b64 = (part.optJSONObject("inlineData") ?: part.optJSONObject("inline_data"))
+                ?.optString("data").orEmpty()
+            if (b64.isEmpty()) return null
+            return android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
         }
     }
 
     private fun play(wav: ByteArray, myGen: Int) {
-        // Skip the RIFF header rather than parsing it: the endpoint is asked
-        // for wav and always returns 16-bit mono PCM at 24k, and a malformed
-        // header would fail at the AudioTrack write anyway.
-        val start = findDataChunk(wav)
+        // Gemini hands back bare PCM (audio/L16), not a container, so every
+        // byte is sample data — skipping a header here would clip the first
+        // syllable.
+        val start = 0
         val pcmLen = wav.size - start
         if (pcmLen <= 0) return
         val minBuf = AudioTrack.getMinBufferSize(
@@ -163,21 +275,4 @@ object AgentSpeech {
         if (track === t) track = null
     }
 
-    /** Offset of the PCM payload, or 44 when the header looks standard. */
-    private fun findDataChunk(wav: ByteArray): Int {
-        var i = 12
-        while (i + 8 < wav.size) {
-            val id = String(wav, i, 4, Charsets.US_ASCII)
-            val size = (wav[i + 4].toInt() and 0xFF) or
-                ((wav[i + 5].toInt() and 0xFF) shl 8) or
-                ((wav[i + 6].toInt() and 0xFF) shl 16) or
-                ((wav[i + 7].toInt() and 0xFF) shl 24)
-            if (id == "data") return i + 8
-            i += 8 + size
-        }
-        return 44.coerceAtMost(wav.size)
-    }
-
-    @Suppress("unused")
-    private fun unusedManagerRef(am: AudioManager) = am
 }

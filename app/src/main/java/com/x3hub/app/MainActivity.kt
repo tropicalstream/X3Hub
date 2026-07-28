@@ -1820,7 +1820,13 @@ class MainActivity : AppCompatActivity() {
                 Log.i(TAG, "Double-tap while modifying — ignored")
                 return
             }
+            // The cursor does not have to still be ON the window. A wearer who
+            // has chosen a window aims at it, double-taps, and is a few px off
+            // — and used to get a Gemini session toggled instead, with nothing
+            // said about why. An ACTIVE window owns the double-tap; with none
+            // active this is untouched and empty space still drives Gemini.
             val window = controller.browserWindowAt(pt.first, pt.second)
+                ?: controller.browserWindows().firstOrNull { it.isActive }
             if (window != null) {
                 // SmartView's flow, and the thing that makes the agent an
                 // agent: the first double-tap OPENS THE MIC, the second ends
