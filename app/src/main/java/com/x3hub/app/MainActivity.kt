@@ -21,6 +21,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.inputmethod.InputMethodManager
 import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -42,6 +43,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
+import com.x3hub.app.ui.CustomKeyboardView
 import com.x3hub.app.ui.DimController
 import com.x3hub.app.core.agent.AgentSpeech
 import com.x3hub.app.core.agent.AgentTaskBridge
@@ -211,6 +213,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Drive the page's own search box; fall back to the web if it has none. */
     private fun searchInPage(query: String, window: BrowserWindowView, retried: Boolean) {
+        // This is about to call el.focus() on the page's own search box, and a
+        // programmatic focus raises the system IME. We know the focus is ours,
+        // so say so BEFORE it happens rather than reacting once the keyboard
+        // is already across both eyes.
+        suppressImeFor(2500L)
         window.evaluateJavascript(PageCommands.searchInPageJs(query)) { result ->
             when {
                 result != null && result.contains("ok") ->
@@ -225,6 +232,122 @@ class MainActivity : AppCompatActivity() {
                     showNotice("Searching the web for ${query.take(32)}")
                 }
             }
+        }
+    }
+
+    // ── On-screen keyboard (the system IME is unusable on this display) ──
+    private var keyboardView: CustomKeyboardView? = null
+    private var keyboardOwner: BrowserWindowView? = null
+    private var suppressImeUntilMs = 0L
+    private val imeSuppressor = Handler(Looper.getMainLooper())
+    private val keyboardHideRunnable = Runnable { hideOnScreenKeyboard() }
+
+    /**
+     * Hold the system IME down for a while.
+     *
+     * One hide() is not enough: the IME is raised by the WebView's own input
+     * connection AFTER the focus that triggered it, so a single call races
+     * and loses. Ticking for the duration is what actually keeps it off the
+     * display — and on this hardware it must be kept off, because it renders
+     * into the raw 1280x480 framebuffer, spans both eyes at the wrong scale,
+     * and the wearer cannot dismiss it by looking at it.
+     */
+    private fun suppressImeFor(durationMs: Long) {
+        suppressImeUntilMs = SystemClock.uptimeMillis() + durationMs
+        imeSuppressor.removeCallbacksAndMessages(null)
+        fun tick() {
+            hideSystemKeyboard()
+            if (SystemClock.uptimeMillis() < suppressImeUntilMs) {
+                imeSuppressor.postDelayed({ tick() }, 90L)
+            }
+        }
+        tick()
+    }
+
+    private fun hideSystemKeyboard() {
+        val root = findViewById<View?>(R.id.mainContainer) ?: return
+        runCatching {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                ?.hideSoftInputFromWindow(root.windowToken, 0)
+        }
+    }
+
+    private fun showOnScreenKeyboard(window: BrowserWindowView) {
+        suppressImeFor(1500L)
+        keyboardOwner = window
+        val overlay = findViewById<FrameLayout?>(R.id.unipanelOverlay) ?: return
+        val kb = keyboardView ?: CustomKeyboardView(this).also { v ->
+            v.layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            )
+            v.setOnKeyboardActionListener(keyboardActions)
+            overlay.addView(v)
+            keyboardView = v
+        }
+        kb.visibility = View.VISIBLE
+        kb.bringToFront()
+        setCursorVisible(true)
+        resetKeyboardHideTimer()
+    }
+
+    /** Idle keyboards are just lost display; 20s of no key is idle. */
+    private fun resetKeyboardHideTimer() {
+        uiHandler.removeCallbacks(keyboardHideRunnable)
+        uiHandler.postDelayed(keyboardHideRunnable, 20_000L)
+    }
+
+    private fun hideOnScreenKeyboard() {
+        uiHandler.removeCallbacks(keyboardHideRunnable)
+        keyboardView?.visibility = View.GONE
+        keyboardOwner?.defocusField()
+        keyboardOwner = null
+    }
+
+    private val keyboardActions = object : CustomKeyboardView.OnKeyboardActionListener {
+        override fun onKeyPressed(key: String) {
+            resetKeyboardHideTimer(); suppressImeFor(900L); keyboardOwner?.insertText(key)
+        }
+        override fun onBackspacePressed() {
+            resetKeyboardHideTimer(); suppressImeFor(900L); keyboardOwner?.backspace()
+        }
+        override fun onEnterPressed() {
+            suppressImeFor(1500L); keyboardOwner?.submitField(); hideOnScreenKeyboard()
+        }
+        override fun onHideKeyboard() = hideOnScreenKeyboard()
+        override fun onClearPressed() { resetKeyboardHideTimer(); keyboardOwner?.clearField() }
+        override fun onMoveCursorLeft() { resetKeyboardHideTimer(); keyboardOwner?.moveCaret(-1) }
+        override fun onMoveCursorRight() { resetKeyboardHideTimer(); keyboardOwner?.moveCaret(1) }
+        override fun onMicrophonePressed() {
+            // Dictation into the field, using the same capture the agent uses.
+            val w = keyboardOwner ?: return
+            resetKeyboardHideTimer()
+            startFieldDictation(w)
+        }
+    }
+
+    /** Speak into the focused field rather than tapping it out letter by letter. */
+    private fun startFieldDictation(window: BrowserWindowView) {
+        if (agentRecorder.isRecording) { finishFieldDictation(window); return }
+        if (!AgentVoice.hasKey(applicationContext)) {
+            showNotice("No Groq key for speech — triple-tap for settings.")
+            return
+        }
+        if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) exitGeminiFully()
+        uiHandler.postDelayed({
+            if (agentRecorder.start()) {
+                showNotice("Dictating — press the mic again when done.")
+                uiHandler.postDelayed({ finishFieldDictation(window) }, AgentVoice.MAX_RECORD_MS)
+            } else showNotice("Microphone unavailable.")
+        }, 300L)
+    }
+
+    private fun finishFieldDictation(window: BrowserWindowView) {
+        val audio = agentRecorder.stop() ?: run { showNotice("Didn't catch that."); return }
+        AgentVoice.transcribe(applicationContext, audio) { text, error ->
+            if (text == null) showNotice(error ?: "Didn't catch that.")
+            else { window.insertText(text); resetKeyboardHideTimer() }
         }
     }
 
@@ -920,7 +1043,11 @@ class MainActivity : AppCompatActivity() {
             if (dimmed) setCursorVisible(false)
         }
 
-        hudPinBoardController?.onBrowserWindowCreated = { w -> agentFor(w) }
+        hudPinBoardController?.onBrowserWindowCreated = { w ->
+            agentFor(w)
+            w.onPageInputFocus = { showOnScreenKeyboard(w) }
+            w.onPageInputBlur = { }   // the hide timer owns dismissal
+        }
         AgentTaskBridge.setListener { task ->
             uiHandler.post {
                 // The ACTIVE window if there is one, else the only window —
@@ -1679,6 +1806,21 @@ class MainActivity : AppCompatActivity() {
         // tap at all — otherwise pressing a settings card silently activates
         // the window sitting beneath it and the panel appears dead. This is
         // the ONLY way to enter a key on-device, so it has to win.
+        // The on-screen keyboard is drawn over everything and is the reason
+        // the wearer is pointing there at all, so it gets the click first.
+        keyboardView?.takeIf { it.visibility == View.VISIBLE }?.let { kb ->
+            val loc = IntArray(2)
+            kb.getLocationOnScreen(loc)
+            val top = loc[1].toFloat()
+            if (pt.second >= top) {
+                suppressImeFor(900L)
+                if (kb.handleAnchoredTap(pt.first - loc[0], pt.second - top)) return
+                return   // a miss inside the keyboard is still not the page's
+            }
+            // Tapping above the keyboard puts it away.
+            hideOnScreenKeyboard()
+        }
+
         // …and modify mode outranks BOTH. The board consumes the next tap to
         // delete (✕ chip) or move the pin — but a browser pin in MODIFY is by
         // definition not ACTIVE, so the window branch below read every tap on

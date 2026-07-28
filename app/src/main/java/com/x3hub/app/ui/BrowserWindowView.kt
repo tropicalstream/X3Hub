@@ -205,6 +205,46 @@ class BrowserWindowView @JvmOverloads constructor(
         )
     }
 
+    /** Host callbacks for page text fields; set by the activity. */
+    var onPageInputFocus: ((String) -> Unit)? = null
+    var onPageInputBlur: (() -> Unit)? = null
+
+    /**
+     * Register the page-input bridge. Called by the host right where the
+     * agent's bridge is attached — after construction, before the first
+     * load, because addJavascriptInterface only takes effect on the next
+     * navigation.
+     */
+    fun installInputBridge() {
+        webView.addJavascriptInterface(InputBridge(), PageInputBridge.NAME)
+    }
+
+    private inner class InputBridge {
+        @android.webkit.JavascriptInterface
+        fun onInputFocus(value: String) {
+            post { onPageInputFocus?.invoke(value) }
+        }
+
+        @android.webkit.JavascriptInterface
+        fun onInputBlur() {
+            post { onPageInputBlur?.invoke() }
+        }
+    }
+
+    private fun injectInputHooks() {
+        runCatching { webView.evaluateJavascript(PageInputBridge.JS, null) }
+    }
+
+    /** Type into whatever field the page currently has focused. */
+    fun insertText(text: String) =
+        webView.evaluateJavascript("window.__x3Insert && window.__x3Insert(${org.json.JSONObject.quote(text)})", null)
+
+    fun backspace() = webView.evaluateJavascript("window.__x3Backspace && window.__x3Backspace()", null)
+    fun clearField() = webView.evaluateJavascript("window.__x3Clear && window.__x3Clear()", null)
+    fun moveCaret(d: Int) = webView.evaluateJavascript("window.__x3MoveCaret && window.__x3MoveCaret($d)", null)
+    fun submitField() = webView.evaluateJavascript("window.__x3Enter && window.__x3Enter()", null)
+    fun defocusField() = webView.evaluateJavascript("window.__x3Defocus && window.__x3Defocus()", null)
+
     /** Probe: run arbitrary JS in the page and log the result. */
     fun debugEval(js: String) {
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
@@ -307,6 +347,8 @@ class BrowserWindowView @JvmOverloads constructor(
         // clickable thing the page agent has to reason about.
         requestInterceptor = { req -> AdBlock.intercept(req) }
         installServiceWorkerFilter()
+        // Before configureWebView, and therefore before any load:
+        // addJavascriptInterface only takes effect on the next navigation.
         configureWebView(webView)
         addView(webView)
 
@@ -395,10 +437,12 @@ class BrowserWindowView @JvmOverloads constructor(
 
         runCatching { wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true) }
 
-        // There is no text entry in this build, and an IME erupting over the
-        // HUD would cover the world with a keyboard the wearer cannot
-        // dismiss. Reflective because setShowSoftInputOnFocus is public on
-        // TextView but hidden on WebView.
+        // The system IME renders into the raw 1280x480 framebuffer, so it
+        // spans BOTH eyes at the wrong scale and cannot be dismissed by
+        // looking at it. Text entry goes through the glasses' own keyboard
+        // instead. Reflective because setShowSoftInputOnFocus is public on
+        // TextView but hidden on WebView — and not sufficient on its own,
+        // which is why the activity also suppresses actively.
         runCatching {
             WebView::class.java
                 .getMethod("setShowSoftInputOnFocus", java.lang.Boolean.TYPE)
@@ -443,6 +487,7 @@ class BrowserWindowView @JvmOverloads constructor(
             ) {
                 super.onPageStarted(view, url, favicon)
                 injectPolyfills()
+                injectInputHooks()
                 onPageStartedListener?.invoke(url)
             }
 
@@ -458,6 +503,7 @@ class BrowserWindowView @JvmOverloads constructor(
                 // parse finds the shims, and at finish for anything the
                 // document replaced in between.
                 injectPolyfills()
+                injectInputHooks()
                 restoreScrollAfterResize()
                 if (BuildConfig.DEBUG) {
                     view?.evaluateJavascript(

@@ -312,6 +312,7 @@ class HudPinBoardController(
                 // since loaded) leaves the agent running against a bridge
                 // that does not exist in the document — it initialises, plans,
                 // then dies on "X3Bridge is not defined".
+                w.installInputBridge()
                 onBrowserWindowCreated?.invoke(w)
                 w.maxSizeProvider = {
                     val z = computeZone()
