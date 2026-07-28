@@ -335,6 +335,10 @@ class HudPinBoardController(
     /** Every live window, for lifecycle forwarding and "deactivate the others". */
     fun browserWindows(): Collection<BrowserWindowView> = browserWindows.values
 
+    /** The pin id backing a window, so a caller can close it via the store. */
+    fun pinIdFor(window: BrowserWindowView): String? =
+        browserWindows.entries.firstOrNull { it.value === window }?.key
+
     /** Drop a window whose pin has gone, so its WebView is not leaked. */
     fun releaseBrowserWindow(pinId: String) {
         browserWindows.remove(pinId)?.destroy()

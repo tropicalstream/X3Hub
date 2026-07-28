@@ -36,7 +36,11 @@ class ToolDispatcher(
         // Saving a page needs a picture of it, which means drawing a live
         // View — so unlike every tool above, this one hands the job to the
         // activity through BookmarkBridge and waits for the answer.
-        BookmarkTool(context)
+        BookmarkTool(context),
+        // Reading and steering the window the wearer picked. Both need a
+        // live WebView on the main thread, so both go through WindowBridge.
+        ReadPageTool(context),
+        WindowControlTool(context)
     ).associateBy { it.name }
 
     fun isSupported(name: String): Boolean = tools.containsKey(name.trim())
