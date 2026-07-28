@@ -1361,16 +1361,20 @@ class MainActivity : AppCompatActivity() {
     // fast scroll. And a short dwell has to pass before anything moves, so
     // crossing a band on the way somewhere else does not jog the page.
     private var edgeWindow: BrowserWindowView? = null
-    private var edgeVelocity = 0f
+    private var edgeVx = 0f
+    private var edgeVy = 0f
     private var edgeArmed = false
 
     private val edgeDwellRunnable = Runnable {
         edgeArmed = true
-        edgeWindow?.setEdgeScrollVelocity(edgeVelocity)
+        edgeWindow?.setEdgeScrollVelocity(edgeVx, edgeVy)
     }
 
+    /** Where the cursor is asking a window to scroll, and how fast. */
+    private data class EdgeScroll(val window: BrowserWindowView, val vx: Float, val vy: Float)
+
     /** The window and velocity the cursor is currently asking for, if any. */
-    private fun edgeScrollRequest(): Pair<BrowserWindowView, Float>? {
+    private fun edgeScrollRequest(): EdgeScroll? {
         if (hubSettingsOverlay?.isShowing == true) return null
         // While the keyboard is up the wearer is typing, and scrolling would
         // drag the field they are typing into off the screen.
@@ -1384,44 +1388,59 @@ class MainActivity : AppCompatActivity() {
         val w = c.browserWindowAt(pt.first, pt.second)?.takeIf { it.isActive } ?: return null
         val loc = IntArray(2)
         w.getLocationOnScreen(loc)
-        val fromTop = pt.second - loc[1]
-        val fromBottom = (loc[1] + w.height) - pt.second
+        val vy = edgeVelocityFor(pt.second - loc[1], (loc[1] + w.height) - pt.second)
+        val vx = edgeVelocityFor(pt.first - loc[0], (loc[0] + w.width) - pt.first)
+        // A corner asks for both at once, which is exactly right: it is the
+        // only way to reach the far corner of something wider AND taller
+        // than the window.
+        if (vx == 0f && vy == 0f) return null
+        return EdgeScroll(w, vx, vy)
+    }
+
+    /**
+     * One axis: distance from the low edge and the high edge, in px, to a
+     * signed velocity. Negative scrolls toward the low edge (up / left).
+     */
+    private fun edgeVelocityFor(fromLow: Float, fromHigh: Float): Float {
         val depth: Float
         val direction: Float
         when {
-            fromTop < EDGE_BAND_PX -> { depth = EDGE_BAND_PX - fromTop; direction = -1f }
-            fromBottom < EDGE_BAND_PX -> { depth = EDGE_BAND_PX - fromBottom; direction = 1f }
-            else -> return null
+            fromLow < EDGE_BAND_PX -> { depth = EDGE_BAND_PX - fromLow; direction = -1f }
+            fromHigh < EDGE_BAND_PX -> { depth = EDGE_BAND_PX - fromHigh; direction = 1f }
+            else -> return 0f
         }
+        // Outside the window entirely (either distance negative) is not an
+        // edge, it is somewhere else.
+        if (fromLow < 0f || fromHigh < 0f) return 0f
         val t = (depth / EDGE_BAND_PX).coerceIn(0f, 1f)
         // Quantised so a slide inside the band does not fire a bridge call per
         // motion event; the page is animating itself between updates anyway.
-        val stepped = ((direction * EDGE_MAX_PX_PER_S * t * t) / EDGE_SPEED_STEP)
+        return ((direction * EDGE_MAX_PX_PER_S * t * t) / EDGE_SPEED_STEP)
             .roundToInt() * EDGE_SPEED_STEP
-        if (stepped == 0f) return null
-        return w to stepped
     }
 
     private fun updateEdgeScroll() {
         val request = edgeScrollRequest()
         if (request == null) { stopEdgeScroll(); return }
-        val (w, v) = request
-        if (w !== edgeWindow) {
+        if (request.window !== edgeWindow) {
             stopEdgeScroll()
-            edgeWindow = w
-            edgeVelocity = v
+            edgeWindow = request.window
+            edgeVx = request.vx
+            edgeVy = request.vy
             uiHandler.postDelayed(edgeDwellRunnable, EDGE_DWELL_MS)
             return
         }
-        edgeVelocity = v
-        if (edgeArmed) w.setEdgeScrollVelocity(v)
+        edgeVx = request.vx
+        edgeVy = request.vy
+        if (edgeArmed) request.window.setEdgeScrollVelocity(request.vx, request.vy)
     }
 
     private fun stopEdgeScroll() {
         uiHandler.removeCallbacks(edgeDwellRunnable)
-        edgeWindow?.setEdgeScrollVelocity(0f)
+        edgeWindow?.setEdgeScrollVelocity(0f, 0f)
         edgeWindow = null
-        edgeVelocity = 0f
+        edgeVx = 0f
+        edgeVy = 0f
         edgeArmed = false
     }
 

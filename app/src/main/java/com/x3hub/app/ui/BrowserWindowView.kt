@@ -214,14 +214,16 @@ class BrowserWindowView @JvmOverloads constructor(
     // call when the speed changes, one to stop. Picking which box actually
     // scrolls is a DOM sweep, so it happens once per scroll, not per frame.
 
-    private var edgeScrollVelocity = 0f
+    private var edgeScrollVx = 0f
+    private var edgeScrollVy = 0f
 
-    /** px/second; positive scrolls down. 0 stops. */
-    fun setEdgeScrollVelocity(pxPerSecond: Float) {
-        if (pxPerSecond == edgeScrollVelocity) return
-        edgeScrollVelocity = pxPerSecond
+    /** px/second; positive scrolls right/down. Both 0 stops. */
+    fun setEdgeScrollVelocity(vx: Float, vy: Float) {
+        if (vx == edgeScrollVx && vy == edgeScrollVy) return
+        edgeScrollVx = vx
+        edgeScrollVy = vy
         webView.evaluateJavascript(
-            "window.__x3EdgeScroll && window.__x3EdgeScroll($pxPerSecond);", null
+            "window.__x3EdgeScroll && window.__x3EdgeScroll($vx,$vy);", null
         )
     }
 
@@ -231,7 +233,8 @@ class BrowserWindowView @JvmOverloads constructor(
      * deduped away and the page sits still.
      */
     private fun resetEdgeScrollState() {
-        edgeScrollVelocity = 0f
+        edgeScrollVx = 0f
+        edgeScrollVy = 0f
     }
 
     /** Host callbacks for page text fields; set by the activity. */
@@ -591,7 +594,7 @@ class BrowserWindowView @JvmOverloads constructor(
         // An edge scroll outlives the cursor that started it otherwise: the
         // page animates itself, so nothing stops when the window loses the
         // input and the wearer watches a window they no longer own scroll on.
-        setEdgeScrollVelocity(0f)
+        setEdgeScrollVelocity(0f, 0f)
     }
 
     /**
@@ -607,7 +610,7 @@ class BrowserWindowView @JvmOverloads constructor(
         isModifying = on
         if (on) {
             isActive = false
-            setEdgeScrollVelocity(0f)
+            setEdgeScrollVelocity(0f, 0f)
         }
         foreground = if (on) borderModify else borderInert
     }
@@ -890,59 +893,86 @@ class BrowserWindowView @JvmOverloads constructor(
         private val EDGE_SCROLL_JS = """
             (function(){
               if (window.__x3EdgeScroll) return;
-              var E = { v:0, raf:0, last:0, acc:0, target:null, still:0, lastPos:null };
-              function pick(){
+              var E = { vx:0, vy:0, raf:0, last:0, accX:0, accY:0,
+                        tx:null, ty:null, still:0, lastX:null, lastY:null };
+
+              // Per-axis, because the box that scrolls sideways is often not
+              // the one that scrolls down — a wide table inside an article
+              // is the usual case.
+              function pick(horiz){
                 try {
                   var best = null, bestArea = 0, all = document.querySelectorAll('*');
                   for (var i = 0; i < all.length && i < 4000; i++){
                     var e = all[i];
                     var s = getComputedStyle(e);
-                    if (!/auto|scroll/.test(s.overflowY)) continue;
-                    if (e.scrollHeight <= e.clientHeight + 4) continue;
+                    if (!/auto|scroll/.test(horiz ? s.overflowX : s.overflowY)) continue;
+                    var can = horiz ? (e.scrollWidth > e.clientWidth + 4)
+                                    : (e.scrollHeight > e.clientHeight + 4);
+                    if (!can) continue;
                     var r = e.getBoundingClientRect(), a = r.width * r.height;
                     if (a > bestArea){ bestArea = a; best = e; }
                   }
                   // Only trust an inner pane when the document itself cannot
-                  // scroll — same rule the agent's scroll uses.
-                  var docH = document.documentElement.scrollHeight;
-                  if (best && bestArea > innerWidth * innerHeight * 0.4 &&
-                      docH <= innerHeight + 4) return best;
+                  // scroll on that axis — same rule the agent's scroll uses.
+                  var docCan = horiz
+                    ? (document.documentElement.scrollWidth > innerWidth + 4)
+                    : (document.documentElement.scrollHeight > innerHeight + 4);
+                  // Sideways scrollers are shapes, not panes — a wide table or
+                  // a carousel is a strip that covers far less of the viewport
+                  // than a vertical content pane does. Holding horizontal to
+                  // the vertical threshold means never finding them.
+                  var minArea = horiz ? 0.10 : 0.40;
+                  if (best && bestArea > innerWidth * innerHeight * minArea && !docCan) return best;
                 } catch (err) {}
                 return window;
               }
-              function pos(){
-                return E.target === window
-                  ? (window.pageYOffset || document.documentElement.scrollTop || 0)
-                  : E.target.scrollTop;
+              function posOf(t, horiz){
+                if (!t) return 0;
+                if (t === window) return horiz
+                  ? (window.pageXOffset || document.documentElement.scrollLeft || 0)
+                  : (window.pageYOffset || document.documentElement.scrollTop || 0);
+                return horiz ? t.scrollLeft : t.scrollTop;
+              }
+              function apply(t, dx, dy){
+                if (t === window) window.scrollBy(dx, dy);
+                else { if (dx) t.scrollLeft += dx; if (dy) t.scrollTop += dy; }
               }
               function step(ts){
-                if (!E.v || !E.target){ E.raf = 0; return; }
+                if (!E.vx && !E.vy){ E.raf = 0; return; }
                 if (!E.last) E.last = ts;
                 var dt = ts - E.last; E.last = ts;
                 if (dt > 64) dt = 64;
                 if (dt < 0) dt = 0;
-                E.acc += E.v * dt / 1000;
-                var whole = E.acc > 0 ? Math.floor(E.acc) : Math.ceil(E.acc);
-                if (whole){
-                  E.acc -= whole;
-                  if (E.target === window) window.scrollBy(0, whole);
-                  else E.target.scrollTop += whole;
-                }
-                var p = pos();
-                if (E.lastPos !== null && p === E.lastPos){
-                  if (++E.still > 40){ E.v = 0; E.raf = 0; return; }
-                } else { E.still = 0; }
-                E.lastPos = p;
+                E.accX += E.vx * dt / 1000;
+                E.accY += E.vy * dt / 1000;
+                var wx = E.accX > 0 ? Math.floor(E.accX) : Math.ceil(E.accX);
+                var wy = E.accY > 0 ? Math.floor(E.accY) : Math.ceil(E.accY);
+                if (wx){ E.accX -= wx; apply(E.tx, wx, 0); }
+                if (wy){ E.accY -= wy; apply(E.ty, 0, wy); }
+                var px = posOf(E.tx, true), py = posOf(E.ty, false);
+                // Only an axis that is actually being driven counts as
+                // progress, or a purely vertical scroll would look stuck
+                // because x never changes.
+                var moved = (E.vx && (E.lastX === null || px !== E.lastX)) ||
+                            (E.vy && (E.lastY === null || py !== E.lastY));
+                if (!moved){ if (++E.still > 40){ E.vx = 0; E.vy = 0; E.raf = 0; return; } }
+                else E.still = 0;
+                E.lastX = px; E.lastY = py;
                 E.raf = requestAnimationFrame(step);
               }
-              window.__x3EdgeScroll = function(v){
-                E.v = v;
-                if (!v){
+              window.__x3EdgeScroll = function(vx, vy){
+                vy = vy || 0;
+                E.vx = vx || 0; E.vy = vy;
+                if (!E.vx && !E.vy){
                   if (E.raf) cancelAnimationFrame(E.raf);
-                  E.raf = 0; E.target = null; E.acc = 0; E.lastPos = null; E.still = 0;
+                  E.raf = 0; E.tx = null; E.ty = null;
+                  E.accX = 0; E.accY = 0; E.lastX = null; E.lastY = null; E.still = 0;
                   return;
                 }
-                if (!E.target){ E.target = pick(); E.lastPos = null; E.still = 0; }
+                // Resolve each axis lazily: the DOM sweep is the expensive
+                // part and a vertical-only scroll must not pay for it twice.
+                if (E.vx && !E.tx){ E.tx = pick(true); E.lastX = null; E.still = 0; }
+                if (E.vy && !E.ty){ E.ty = pick(false); E.lastY = null; E.still = 0; }
                 if (!E.raf){ E.last = 0; E.raf = requestAnimationFrame(step); }
               };
             })();
