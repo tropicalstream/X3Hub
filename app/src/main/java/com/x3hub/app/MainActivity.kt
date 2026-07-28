@@ -2051,15 +2051,15 @@ class MainActivity : AppCompatActivity() {
             }
             // Already active: this one is for the page.
             if (forwardClickToWindow(window, pt.first, pt.second)) return
-        } else if (!modalUp) {
-            // Clicking away from an active window releases it. Reachable only
-            // while the keyboard is up (the one time the cursor can leave an
-            // active window) or when the cursor was already outside it —
-            // otherwise the active window owns the slide and the cursor never
-            // gets out, and triple-tap is the deliberate exit. Taps that land
-            // on a modal panel are not "away": they are not about the window.
-            hudPinBoardController?.browserWindows()?.forEach { it.deactivate() }
         }
+        // A tap away from the window NO LONGER releases it. The activation is
+        // the wearer's selection — "this is the page I mean" — and the very
+        // next thing they do with it is often somewhere else: tap empty space
+        // to wake Gemini and say "pin this page". Releasing on that tap meant
+        // the assistant arrived to find no window chosen and the pin tool
+        // guessing. A window now stays picked until the wearer picks another,
+        // enters MODIFY on it, or closes it — the cyan border tells the truth
+        // for as long as it shows.
 
         val handled = dispatchOverlayTouchIfHit(pt.first, pt.second)
         Log.d(TAG, "click at cursor (${pt.first}, ${pt.second}) handled=$handled")
