@@ -412,16 +412,21 @@ class MainActivity : AppCompatActivity() {
         window.ensureLoaded {
             // onPageFinished fires before the first paint, and a thumbnail
             // taken there comes back empty — give the page a frame to draw.
-            if (wasAsleep) {
-                uiHandler.postDelayed({ reply(captureBookmark(window)) }, PAINT_SETTLE_MS)
-            } else {
-                reply(captureBookmark(window))
+            val go = {
+                // Ask the PAGE where it is, not the WebView: on a single-page
+                // app they disagree, and the WebView's answer is the feed the
+                // wearer arrived on rather than what they were looking at.
+                window.resolveLiveUrl { liveUrl -> reply(captureBookmark(window, liveUrl)) }
             }
+            if (wasAsleep) uiHandler.postDelayed(go, PAINT_SETTLE_MS) else go()
         }
     }
 
-    private fun captureBookmark(window: BrowserWindowView): BookmarkBridge.Saved {
-        val url = window.currentUrl?.takeIf { it.isNotBlank() }
+    private fun captureBookmark(
+        window: BrowserWindowView,
+        liveUrl: String? = null
+    ): BookmarkBridge.Saved {
+        val url = (liveUrl ?: window.currentUrl)?.takeIf { it.isNotBlank() }
             ?: return BookmarkBridge.Saved(
                 false, error = "That window has not loaded a page yet."
             )

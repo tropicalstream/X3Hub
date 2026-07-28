@@ -344,6 +344,29 @@ class BrowserWindowView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * The address the page itself believes it is at.
+     *
+     * Not the same as WebView.getUrl() on a single-page app. Tapping a video
+     * on YouTube, or a day in Google Calendar, changes the document through
+     * the history API — and what gets bookmarked from getUrl() can still be
+     * the feed the wearer arrived on rather than the thing they were looking
+     * at. A bookmark that reopens "the site" instead of "this" is not a
+     * bookmark. Reads location.href, falling back to getUrl().
+     */
+    fun resolveLiveUrl(callback: (String?) -> Unit) {
+        deferredUrl?.let { callback(it); return }
+        val fallback = webView.url?.takeIf { it.isNotBlank() && it != "about:blank" }
+        runCatching {
+            webView.evaluateJavascript("location.href") { raw ->
+                val fromPage = raw
+                    ?.trim()?.removeSurrounding("\"")
+                    ?.takeIf { it.isNotBlank() && it != "null" && it != "about:blank" }
+                callback(fromPage ?: fallback)
+            }
+        }.onFailure { callback(fallback) }
+    }
+
     /** The page's own title, or null before the first load completes. */
     val pageTitle: String? get() = webView.title?.takeIf { it.isNotBlank() }
 

@@ -175,7 +175,18 @@ class GeminiLiveClient(
          * left temple arm to activate the camera" while the camera is plainly
          * streaming. The frame has to ride along in the turn itself.
          */
-        fun sendClientText(text: String, imageBase64: String? = null): Boolean {
+        fun sendClientText(
+            text: String,
+            imageBase64: String? = null,
+            /**
+             * false appends this to the conversation WITHOUT asking for a
+             * reply. Needed when the turn is reference material for a tool
+             * call already in flight: with turnComplete=true the model
+             * answers the picture on its own, so the wearer hears the tool's
+             * guess first and a correction second.
+             */
+            turnComplete: Boolean = true
+        ): Boolean {
             if (text.isBlank()) return false
             val parts = JSONArray()
             // Image FIRST: Gemini reads parts in order, and a question that
@@ -197,7 +208,7 @@ class GeminiLiveClient(
                     .put("turns", JSONArray().put(
                         JSONObject().put("role", "user").put("parts", parts)
                     ))
-                    .put("turnComplete", true)
+                    .put("turnComplete", turnComplete)
             )
             return socket.send(payload.toString())
         }
