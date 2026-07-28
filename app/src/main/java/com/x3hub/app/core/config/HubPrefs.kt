@@ -12,6 +12,7 @@ object HubPrefs {
 
     private const val PREFS_FILE = "x3hub_config"
     private const val PREF_BARGE_IN = "voice_barge_in"
+    private const val PREF_LINK_RESEARCH = "link_research"
 
     /**
      * Whether the wearer can talk over Gemini mid-reply.
@@ -33,6 +34,31 @@ object HubPrefs {
 
     fun setBargeInEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(PREF_BARGE_IN, enabled).apply()
+    }
+
+    /**
+     * Swap Google Search grounding for Gemini's URL-reading tool.
+     *
+     * This is a CHOICE, not a feature flag, because the Live API refuses to
+     * take both — a setup carrying googleSearch and urlContext together is
+     * closed with "Search tool, and Url Context tool are not supported
+     * together", verified against the live endpoint. So the session runs
+     * with one or the other:
+     *
+     *   OFF (default)  googleSearch — the assistant can answer about
+     *                  current things it was never trained on, which is
+     *                  most of what a wearer asks aloud.
+     *   ON             urlContext — the assistant can FETCH AND READ links
+     *                  it is given or finds on a page, at the cost of not
+     *                  being able to search the web at all.
+     *
+     * Read at connect time, so it takes effect on the next session.
+     */
+    fun linkResearchEnabled(context: Context): Boolean =
+        prefs(context).getBoolean(PREF_LINK_RESEARCH, false)
+
+    fun setLinkResearchEnabled(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(PREF_LINK_RESEARCH, enabled).apply()
     }
 
     private fun prefs(context: Context) =

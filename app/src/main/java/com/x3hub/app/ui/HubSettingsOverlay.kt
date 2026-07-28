@@ -267,6 +267,7 @@ class HubSettingsOverlay(
         col.addView(row)
 
         col.addView(buildBargeInRow())
+        col.addView(buildGroundingRow())
         col.addView(bookmarksBox())
         return col
     }
@@ -278,6 +279,56 @@ class HubSettingsOverlay(
      * transcribed as the wearer. That depends entirely on the room, so it
      * has to be the wearer's choice rather than a constant.
      */
+    /**
+     * Web search OR link reading — the assistant cannot have both.
+     *
+     * Not a preference so much as a forced choice: the Live API closes the
+     * connection on a setup carrying googleSearch and urlContext together
+     * ("Search tool, and Url Context tool are not supported together"),
+     * verified against the live endpoint. Search is the default because it
+     * answers the ordinary spoken question; link reading is for working
+     * through pages you already have.
+     */
+    private fun buildGroundingRow(): View {
+        val row = LinearLayout(activity)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.background = boxBg(fill = 0x14FFFFFF, stroke = 0x40FFFFFF, strokeW = 1)
+        row.setPadding(10, 6, 10, 6)
+        row.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
+
+        val text = LinearLayout(activity)
+        text.orientation = LinearLayout.VERTICAL
+        text.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        text.addView(label("Web knowledge", 16f, ACCENT, bold = true))
+        val sub = label("", 13f, DIM).apply { maxLines = 2 }
+        text.addView(sub)
+        row.addView(text)
+
+        lateinit var toggle: TextView
+        fun render() {
+            val links = HubPrefs.linkResearchEnabled(activity)
+            toggle.text = if (links) "Reads links" else "Searches web"
+            sub.text = if (links) {
+                "Gemini opens and reads any link you give it. It cannot search the web."
+            } else {
+                "Gemini can search for current information. It cannot open links itself."
+            }
+        }
+        toggle = button("", 200) {
+            val next = !HubPrefs.linkResearchEnabled(activity)
+            HubPrefs.setLinkResearchEnabled(activity, next)
+            render()
+            showToast(
+                if (next) "Link reading on, web search off. Restart the session to apply."
+                else "Web search on, link reading off. Restart the session to apply."
+            )
+        }
+        render()
+        row.addView(toggle)
+        return row
+    }
+
     private fun buildBargeInRow(): View {
         val rowBg = boxBg(fill = 0x14FFFFFF, stroke = 0x40FFFFFF, strokeW = 1)
         val row = LinearLayout(activity)

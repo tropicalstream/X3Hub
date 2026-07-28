@@ -107,6 +107,9 @@ class GeminiVoicePipeline(context: Context) {
             personalizationProvider = {
                 com.x3hub.app.core.config.AssistantStore.init(appContext)
                 com.x3hub.app.core.config.AssistantStore.promptSection()
+            },
+            linkResearchProvider = {
+                com.x3hub.app.core.config.HubPrefs.linkResearchEnabled(appContext)
             }
         )
     }
