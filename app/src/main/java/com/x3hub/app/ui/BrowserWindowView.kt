@@ -1006,6 +1006,41 @@ class BrowserWindowView @JvmOverloads constructor(
               window.addEventListener('load', fit);
               setTimeout(fit, 300);
               setTimeout(fit, 1200);
+
+              // Tapping a search-result thumbnail should show the PICTURE.
+              // DuckDuckGo's grid links to its own images app instead — a
+              // JS lightbox built for a phone screen, which on a 170px
+              // window is unusable and never yields a plain image. But it
+              // proxies every thumbnail through /iu/?u=<real url>, so the
+              // actual picture is right there in the markup: take it and
+              // navigate to it, and the fit above frames it.
+              //
+              // Keyed on the proxy host, so this cannot fire on an ordinary
+              // site where clicking a picture is meant to follow a link.
+              function proxiedImage(img){
+                try {
+                  var s = img.currentSrc || img.src || '';
+                  if (s.indexOf('external-content.duckduckgo.com') === -1) return null;
+                  var m = s.match(/[?&]u=([^&]+)/);
+                  return m ? decodeURIComponent(m[1]) : null;
+                } catch (e) { return null; }
+              }
+              if (document.documentElement && !window.__x3ImgOpen) {
+                window.__x3ImgOpen = true;
+                document.addEventListener('click', function(e){
+                  var t = e.target;
+                  if (!t) return;
+                  var img = t.tagName === 'IMG' ? t : (t.closest ? t.closest('img') : null);
+                  if (!img) return;
+                  var full = proxiedImage(img);
+                  if (!full) return;
+                  // Capture phase + stopPropagation, or the site's own
+                  // handler still runs and navigates to its gallery app.
+                  e.preventDefault();
+                  e.stopPropagation();
+                  location.href = full;
+                }, true);
+              }
             })();
         """.trimIndent()
 
