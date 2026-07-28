@@ -971,20 +971,119 @@ class BrowserWindowView @JvmOverloads constructor(
             "Mozilla/5.0 (Linux; Android 12; RayNeo X3 Pro) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
 
+        /**
+         * "Get our app" interstitials, killed on sight.
+         *
+         * These are a nuisance on a phone and fatal here: a window is 170-323
+         * logical px wide, so a banner sized for a phone screen covers the
+         * entire page and there is often no reachable dismiss button — the ✕
+         * sits outside the window's edge. The wearer is left looking at an
+         * advert with no way out.
+         *
+         * Two mechanisms, because one is not enough. A stylesheet of known
+         * selectors lands before the banner ever paints, but the class names
+         * that identify them are increasingly build-hashed and unusable. So a
+         * heuristic sweep backs it up, and it samples with elementsFromPoint
+         * rather than walking the DOM: whatever is covering the middle of the
+         * viewport is the thing in the way, which is O(1) instead of a
+         * getComputedStyle over every node on the page.
+         */
         private val SITE_CHROME_FILTER_JS = """
             (function(){
-              if (!/(^|\.)duckduckgo\.com${'$'}/i.test(location.hostname)) return;
-              var id = 'x3hub-site-chrome-filter';
-              if (document.getElementById(id)) return;
-              var style = document.createElement('style');
-              style.id = id;
-              // DuckDuckGo fills this React host after page load with the
-              // persistent blue "Try the DuckDuckGo browser" promo. The
-              // current mobile template marks the button with serp-atb-btn;
-              // the empty React host covers the alternate template.
-              style.textContent = '#react-browser-update-info,' +
-                '[data-testid="serp-atb-btn"]{display:none!important}';
-              (document.head || document.documentElement).appendChild(style);
+              var STYLE_ID = 'x3hub-site-chrome-filter';
+              if (!document.getElementById(STYLE_ID)){
+                var style = document.createElement('style');
+                style.id = STYLE_ID;
+                style.textContent = [
+                  // DuckDuckGo: the full-page "Get DuckDuckGo Browser" sheet,
+                  // plus the persistent SERP promo in both templates.
+                  '[data-testid="mobile-app-banner"]',
+                  '#react-browser-update-info',
+                  '[data-testid="serp-atb-btn"]',
+                  // The cross-site conventions for the same banner.
+                  '.smartbanner', '[id*="smartbanner" i]', '[class*="smartbanner" i]',
+                  '#branch-banner-iframe', '.branch-banner-iframe', '.branch-journeys-top',
+                  '[class*="app-banner" i]', '[id*="app-banner" i]', '[class*="appbanner" i]',
+                  '[class*="app-promo" i]', '[class*="apppromo" i]',
+                  '[class*="open-in-app" i]', '[class*="openinapp" i]',
+                  '[class*="install-app" i]', '[class*="get-the-app" i]'
+                ].join(',') + '{display:none!important}';
+                (document.head || document.documentElement).appendChild(style);
+              }
+
+              if (window.__x3PromoSweep) return;
+              window.__x3PromoSweep = true;
+
+              // An action verb close to "app"/"browser" — "Get DuckDuckGo
+              // Browser", "Open in app", "Continue in the app". Kept to one
+              // sentence so an article that merely discusses apps does not
+              // trip it.
+              var PROMO = /\b(get|open|download|install|try|use|continue)\b[^.!?]{0,40}\b(app|browser)\b|add to home screen/i;
+
+              function isOverlay(el){
+                try {
+                  if (!el || el === document.body || el === document.documentElement) return false;
+                  var s = getComputedStyle(el);
+                  // Only fixed/sticky: page content scrolls away on its own,
+                  // and hiding something merely absolutely-positioned is how
+                  // a filter starts eating real articles.
+                  if (s.position !== 'fixed' && s.position !== 'sticky') return false;
+                  if (s.display === 'none' || s.visibility === 'hidden') return false;
+                  if (parseFloat(s.opacity) === 0) return false;
+                  var r = el.getBoundingClientRect();
+                  if (r.width < 1 || r.height < 1) return false;
+                  if ((r.width * r.height) / Math.max(1, innerWidth * innerHeight) < 0.25) return false;
+                  return PROMO.test((el.innerText || '').slice(0, 400));
+                } catch (e) { return false; }
+              }
+
+              function unlock(){
+                // These sheets lock the page behind them; leaving that in
+                // place would mean the banner is gone and nothing scrolls.
+                [document.documentElement, document.body].forEach(function(n){
+                  try {
+                    var s = getComputedStyle(n);
+                    if (s.overflow === 'hidden' || s.overflowY === 'hidden'){
+                      n.style.setProperty('overflow', 'auto', 'important');
+                    }
+                  } catch (e) {}
+                });
+              }
+
+              function sweep(){
+                try {
+                  var pts = [
+                    [innerWidth / 2, innerHeight / 2],
+                    [innerWidth / 2, innerHeight * 0.85],
+                    [innerWidth / 2, innerHeight * 0.15]
+                  ];
+                  var hid = false;
+                  for (var p = 0; p < pts.length; p++){
+                    var stack = document.elementsFromPoint(pts[p][0], pts[p][1]) || [];
+                    for (var i = 0; i < stack.length && i < 12; i++){
+                      if (isOverlay(stack[i])){
+                        stack[i].style.setProperty('display', 'none', 'important');
+                        hid = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (hid) unlock();
+                } catch (e) {}
+              }
+
+              sweep();
+              // Most of these arrive a beat after load, some after a scroll.
+              var ticks = 0;
+              var iv = setInterval(function(){ sweep(); if (++ticks > 20) clearInterval(iv); }, 500);
+              try {
+                var pending = false;
+                new MutationObserver(function(){
+                  if (pending) return;
+                  pending = true;
+                  setTimeout(function(){ pending = false; sweep(); }, 400);
+                }).observe(document.documentElement, { childList: true, subtree: true });
+              } catch (e) {}
             })();
         """.trimIndent()
 
