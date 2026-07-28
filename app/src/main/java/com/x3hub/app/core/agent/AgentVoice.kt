@@ -38,6 +38,7 @@ object AgentVoice {
     /** A spoken task is a sentence, not a paragraph. */
     const val MAX_RECORD_MS = 9_000L
 
+
     private val main = Handler(Looper.getMainLooper())
 
     private val http: OkHttpClient by lazy {
@@ -50,7 +51,6 @@ object AgentVoice {
     class Recorder(private val context: Context) {
         private var recorder: MediaRecorder? = null
         private var file: File? = null
-
         @Volatile
         var isRecording = false
             private set
@@ -83,6 +83,7 @@ object AgentVoice {
         fun stop(): File? {
             val f = file
             stopInternal()
+            Log.i(TAG, "recording finished: bytes=${f?.length() ?: 0}")
             return f?.takeIf { it.exists() && it.length() > 1200 }  // ignore blips
         }
 

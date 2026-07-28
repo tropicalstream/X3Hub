@@ -14,6 +14,26 @@ interface VoiceServiceApi {
     /** End the current voice session. Idempotent. */
     fun shutdownVoice()
 
+    /**
+     * Hold the microphone privilege without starting a voice session.
+     *
+     * This app draws itself as a HUD over whatever the wearer is running, so
+     * its Activity is never the top resumed activity — the launcher is. Since
+     * Android 11 a process in that position does not get an error when it
+     * records; it gets SILENCE, indistinguishable from a wearer who said
+     * nothing. Only a foreground service typed `microphone` lifts that, which
+     * is why the Live session hears fine and anything recording from the
+     * Activity does not.
+     *
+     * Reference counted: the camera, the Live session and a page-agent
+     * capture can all want it at once, and whichever finishes first must not
+     * pull it out from under the others.
+     */
+    fun holdMicPrivilege()
+
+    /** Release a [holdMicPrivilege]. Idempotent below zero. */
+    fun releaseMicPrivilege()
+
     /** Snapshot of the HUD state the Service has published. */
     fun currentState(): HudStateBridge.State
 

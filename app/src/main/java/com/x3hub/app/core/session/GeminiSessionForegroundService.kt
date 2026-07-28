@@ -35,6 +35,8 @@ class GeminiSessionForegroundService : LifecycleService() {
     private inner class LocalBinder : Binder(), VoiceServiceApi {
         override fun activateVoice() = this@GeminiSessionForegroundService.activateVoice()
         override fun shutdownVoice() = this@GeminiSessionForegroundService.shutdownVoice()
+        override fun holdMicPrivilege() = this@GeminiSessionForegroundService.holdMicPrivilege()
+        override fun releaseMicPrivilege() = this@GeminiSessionForegroundService.releaseMicPrivilege()
         override fun currentState(): HudStateBridge.State = HudStateBridge.current()
         override fun toggleCamera() = this@GeminiSessionForegroundService.toggleCamera()
         override fun sendDebugText(text: String) { pipeline.sendDebugText(text) }
@@ -176,11 +178,33 @@ class GeminiSessionForegroundService : LifecycleService() {
     private fun shutdownVoice() {
         Log.i(TAG, "shutdownVoice()")
         pipeline.shutdown(reason = null)
-        // Keep the FGS notification only while the camera still needs it.
-        if (!cameraOn) {
-            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
-            foregroundActive = false
-        }
+        dropForegroundIfUnneeded()
+    }
+
+    /**
+     * Outstanding claims on the microphone privilege. A page-agent capture
+     * takes one for the few seconds it records — see [VoiceServiceApi.holdMicPrivilege]
+     * for why recording without it yields silence rather than an error.
+     */
+    private var micHolds = 0
+
+    private fun holdMicPrivilege() {
+        micHolds++
+        startForegroundIfNeeded()
+        Log.i(TAG, "mic privilege held (holds=$micHolds)")
+    }
+
+    private fun releaseMicPrivilege() {
+        if (micHolds > 0) micHolds--
+        Log.i(TAG, "mic privilege released (holds=$micHolds)")
+        dropForegroundIfUnneeded()
+    }
+
+    /** Give up the FGS only when nothing still needs it. */
+    private fun dropForegroundIfUnneeded() {
+        if (cameraOn || micHolds > 0) return
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        foregroundActive = false
     }
 
     // ────────────────────────────────────────────────────────────────

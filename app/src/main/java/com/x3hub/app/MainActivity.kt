@@ -148,10 +148,18 @@ class MainActivity : AppCompatActivity() {
             HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE
         if (geminiWasLiveBeforeTask) exitGeminiFully()
         AgentSpeech.stop()
+        // Without this the recording is nine seconds of silence: the HUD is an
+        // overlay, so our Activity is never the top one, and since Android 11
+        // that means the mic hands back silence instead of an error. Held
+        // before start() because the privilege has to exist when the recorder
+        // opens, not after.
+        runCatching { voiceServiceApi?.holdMicPrivilege() }
+        micPrivilegeHeld = true
         // The mic does not free instantly after the session lets go.
         uiHandler.postDelayed({
             if (!agentRecorder.start()) {
                 showNotice("Microphone unavailable.")
+                releaseMicPrivilege()
                 return@postDelayed
             }
             agentTaskWindow = window
@@ -167,9 +175,19 @@ class MainActivity : AppCompatActivity() {
         }, if (geminiWasLiveBeforeTask) 450L else 0L)
     }
 
+    /** Whether we currently owe the service a mic-privilege release. */
+    private var micPrivilegeHeld = false
+
+    private fun releaseMicPrivilege() {
+        if (!micPrivilegeHeld) return
+        micPrivilegeHeld = false
+        runCatching { voiceServiceApi?.releaseMicPrivilege() }
+    }
+
     /** Second double-tap (or the auto-stop): transcribe and dispatch. */
     private fun finishAgentTask() {
         uiHandler.removeCallbacks(autoStopAgentTask)
+        releaseMicPrivilege()
         val window = agentTaskWindow
         agentTaskWindow = null
         val audio = agentRecorder.stop()
