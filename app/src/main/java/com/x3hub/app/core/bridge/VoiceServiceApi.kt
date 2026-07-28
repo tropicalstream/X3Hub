@@ -52,6 +52,16 @@ interface VoiceServiceApi {
      */
     fun sendDebugText(text: String) {}
 
+    /**
+     * Put a picture in front of the assistant mid-session.
+     *
+     * Some pages ARE a picture — an image result, a chart, a scan — and
+     * their text is empty, so reading them hands the model nothing and it
+     * answers from imagination. Streaming the window itself as a frame lets
+     * it actually look at what the wearer is looking at.
+     */
+    fun sendPageImage(base64Jpeg: String) {}
+
     /** True when CameraX is currently streaming. */
     fun isCameraOn(): Boolean
 

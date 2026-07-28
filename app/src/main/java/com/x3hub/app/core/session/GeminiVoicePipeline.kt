@@ -335,6 +335,12 @@ class GeminiVoicePipeline(context: Context) {
     }
 
     /** Debug only: a typed turn, treated exactly like a spoken one. */
+    /** Stream one still into the session, the way camera frames go. */
+    fun sendPageImage(base64Jpeg: String) {
+        if (base64Jpeg.isBlank()) return
+        liveSession?.sendImageChunkBase64(base64Jpeg, "image/jpeg")
+    }
+
     fun sendDebugText(text: String) {
         if (text.isBlank()) return
         heardUserYet = true

@@ -106,8 +106,17 @@ class BrowserWindowView @JvmOverloads constructor(
     val windowWidth: Int get() = SIZE_LADDER[sizeStep][0]
     val windowHeight: Int get() = SIZE_LADDER[sizeStep][1]
 
-    /** Current page URL, or null before the first load. */
-    val currentUrl: String? get() = webView.url
+    /**
+     * Current page URL, or null before the first load.
+     *
+     * While this window is showing a resume still its WebView has loaded
+     * nothing and reports "about:blank" — but the window plainly IS a page
+     * as far as the wearer is concerned, and callers that ask what it shows
+     * must be told the truth. Otherwise a bookmark of a restored window
+     * saves about:blank.
+     */
+    val currentUrl: String?
+        get() = deferredUrl ?: webView.url?.takeIf { it.isNotBlank() && it != "about:blank" }
 
     /**
      * Fired by [requestExit] — the triple-tap-inside-an-active-window
@@ -279,19 +288,41 @@ class BrowserWindowView @JvmOverloads constructor(
     }
 
     /** Load the real page and take the still down once it has painted. */
-    private fun wakeFromSnapshot() {
-        val url = deferredUrl ?: return
+    private fun wakeFromSnapshot(onReady: ((Boolean) -> Unit)? = null) {
+        val url = deferredUrl
+        if (url == null) { onReady?.invoke(true); return }
         deferredUrl = null
         Log.i(TAG, "waking window from snapshot -> $url")
         // Drop the still only when the page has actually rendered, or the
         // window flashes empty between the two.
         val previous = onPageFinishedListener
+        var settled = false
         onPageFinishedListener = { finishedUrl ->
             clearSnapshot()
             onPageFinishedListener = previous
             previous?.invoke(finishedUrl)
+            if (!settled) { settled = true; onReady?.invoke(true) }
+        }
+        // A page that never finishes must not leave a tool waiting forever;
+        // partial content beats an answer that never comes.
+        if (onReady != null) {
+            postDelayed({ if (!settled) { settled = true; onReady(false) } }, WAKE_TIMEOUT_MS)
         }
         loadUrl(url)
+    }
+
+    /**
+     * Guarantee a live page before something reads or acts on it.
+     *
+     * A window restored from a still holds no document at all — it is
+     * about:blank with no text and no title — so every page tool that ran
+     * against one got nothing and the assistant answered from thin air.
+     * Anything that needs the PAGE, rather than the picture, waits here
+     * first.
+     */
+    fun ensureLoaded(onReady: (Boolean) -> Unit) {
+        if (!isShowingSnapshot) { onReady(true); return }
+        wakeFromSnapshot(onReady)
     }
 
     private fun clearSnapshot() {
@@ -998,6 +1029,9 @@ class BrowserWindowView @JvmOverloads constructor(
 
     companion object {
         private const val TAG = "X3HubBrowserWindow"
+
+        /** How long a tool waits for a woken page before using what it has. */
+        private const val WAKE_TIMEOUT_MS = 8_000L
 
         /**
          * Thumbnail width in px. Twice the ~72px the bookmark pin draws at,
