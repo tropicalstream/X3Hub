@@ -35,8 +35,11 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.x3hub.app.core.bridge.BookmarkStore
+import com.x3hub.app.core.bridge.BookmarkBridge
 import com.x3hub.app.core.bridge.CameraStateBridge
 import com.x3hub.app.core.bridge.ChatCardBridge
+import com.x3hub.app.core.bridge.HudPinStore
 import com.x3hub.app.core.bridge.HudStateBridge
 import com.x3hub.app.core.bridge.VoiceServiceApi
 import androidx.lifecycle.lifecycleScope
@@ -240,6 +243,76 @@ class MainActivity : AppCompatActivity() {
      * in-page search briefly raised our keyboard, use its normal dismissal
      * path; otherwise return the touchpad directly to the hub cursor.
      */
+    /**
+     * Capture the active window, save it as a bookmark, and pin it.
+     *
+     * Same rule the page agent uses for choosing a target: the ACTIVE
+     * window, or the only one if nothing is active. Asking "which page?"
+     * when exactly one is open would be pedantic, and the wearer said
+     * "this page" precisely because they can see it.
+     */
+    private fun bookmarkVisiblePage(): BookmarkBridge.Saved {
+        val c = hudPinBoardController
+        val window = c?.browserWindows()?.firstOrNull { it.isActive }
+            ?: c?.browserWindows()?.singleOrNull()
+            ?: return BookmarkBridge.Saved(
+                false, error = "There is no page open to save."
+            )
+        val url = window.currentUrl?.takeIf { it.isNotBlank() }
+            ?: return BookmarkBridge.Saved(
+                false, error = "That window has not loaded a page yet."
+            )
+        val title = window.pageTitle
+            ?: runCatching { java.net.URL(url).host }.getOrNull()
+            ?: "Saved page"
+
+        // A failed capture must not lose the bookmark — the address and the
+        // name are the useful part, and the thumbnail is decoration.
+        val thumbPath = runCatching {
+            window.captureThumbnail()?.let { bmp ->
+                val f = java.io.File(
+                    BookmarkStore.thumbDir(applicationContext),
+                    "bm_${System.currentTimeMillis()}.jpg"
+                )
+                java.io.FileOutputStream(f).use { out ->
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, out)
+                }
+                bmp.recycle()
+                f.absolutePath
+            }
+        }.onFailure { Log.w(TAG, "thumbnail save failed: ${it.message}") }.getOrNull()
+
+        BookmarkStore.init(applicationContext)
+        val bookmark = BookmarkStore.Bookmark(url = url, title = title, thumbPath = thumbPath)
+        if (!BookmarkStore.add(bookmark)) {
+            return BookmarkBridge.Saved(
+                false,
+                error = "Your bookmarks are full (${BookmarkStore.MAX_BOOKMARKS}). " +
+                    "Remove one in settings first."
+            )
+        }
+
+        // The pin is optional: the bookmark is saved either way, and a full
+        // board is a reason to say so, not to fail the save.
+        if (thumbPath != null) {
+            val pinned = HudPinStore.add(
+                HudPinStore.HudPin(
+                    type = HudPinStore.TYPE_BOOKMARK,
+                    label = title,
+                    payload = thumbPath,
+                    sourceUrl = url
+                )
+            )
+            if (!pinned) {
+                return BookmarkBridge.Saved(
+                    true, title = "$title — saved, but the HUD board is full so it is not pinned"
+                )
+            }
+        }
+        Log.i(TAG, "bookmarked '$title' ($url) thumb=${thumbPath != null}")
+        return BookmarkBridge.Saved(true, title = title)
+    }
+
     private fun releasePageCommandToCursor(window: BrowserWindowView) {
         if (keyboardOwner === window && keyboardView?.visibility == View.VISIBLE) {
             hideOnScreenKeyboard()
@@ -605,6 +678,14 @@ class MainActivity : AppCompatActivity() {
                     }
                     Log.i(TAG, "DEBUG camera want=$want isOn=$isOn -> $target")
                     if (target != isOn) toggleCamera()
+                    return
+                }
+                intent?.getStringExtra("bookmark")?.let {
+                    // Exercises capture -> save -> pin WITHOUT the assistant.
+                    // The spoken route still has to be tested by voice; this
+                    // only proves the mechanics underneath it.
+                    val r = bookmarkVisiblePage()
+                    Log.i(TAG, "DEBUG bookmark ok=${r.ok} title=${r.title} err=${r.error}")
                     return
                 }
                 intent?.getStringExtra("js")?.let { js ->
@@ -1103,6 +1184,12 @@ class MainActivity : AppCompatActivity() {
             w.onPageInputFocus = { showOnScreenKeyboard(w) }
             w.onPageInputBlur = { }   // the hide timer owns dismissal
         }
+        BookmarkBridge.setHandler { reply ->
+            // Drawing a View is main-thread work and the tool coroutine is
+            // not on it; everything below runs here so the capture is legal.
+            uiHandler.post { reply(bookmarkVisiblePage()) }
+        }
+
         AgentTaskBridge.setListener { task ->
             uiHandler.post {
                 // The ACTIVE window if there is one, else the only window —
@@ -1740,13 +1827,22 @@ class MainActivity : AppCompatActivity() {
     /**
      * True only where a single tap is irreversible enough to be worth waiting
      * on: inside a page that already has the input, where a click can navigate
-     * away. Everything else is cheap to undo, so it fires at once.
+     * away — and on empty space, where a second meaning genuinely exists.
+     * Everything else is cheap to undo, so it fires at once.
      */
     private fun tapNeedsDeferral(point: Pair<Float, Float>): Boolean {
         if (hubSettingsOverlay?.isShowing == true) return false
         val window = hudPinBoardController?.browserWindowAt(point.first, point.second)
-            ?: return false
-        return window.isActive && hudPinBoardController?.isInModifyMode() != true
+        if (window != null) {
+            return window.isActive && hudPinBoardController?.isInModifyMode() != true
+        }
+        // Empty space means BOTH "start Gemini" (one tap) and "open settings"
+        // (three). Firing the first immediately meant every triple-tap for
+        // settings also opened a voice session behind it — connecting, greeting
+        // and grabbing the mic, none of which the wearer asked for. The 340ms
+        // is worth paying here and nowhere else: starting a session is stateful
+        // and slow anyway, so the delay disappears into the connect.
+        return findOverlayHit(point.first, point.second) == null
     }
 
     /**

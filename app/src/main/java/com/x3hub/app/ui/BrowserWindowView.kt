@@ -237,6 +237,56 @@ class BrowserWindowView @JvmOverloads constructor(
         edgeScrollVy = 0f
     }
 
+    /** The page's own title, or null before the first load completes. */
+    val pageTitle: String? get() = webView.title?.takeIf { it.isNotBlank() }
+
+    /**
+     * A still of the page, for a bookmark thumbnail. Main thread only.
+     *
+     * Two things make this less obvious than drawToBitmap would be.
+     *
+     * The WebView is pinned to LAYER_TYPE_HARDWARE because the SBS
+     * compositor draws the whole viewport twice per frame and Chromium's
+     * draw functor only runs once — but a view on a hardware layer draws
+     * that cached layer, not its content, into a software Canvas, and the
+     * result is blank. So the layer is dropped for the duration of the
+     * capture and put back immediately; anything else silently produces an
+     * empty thumbnail.
+     *
+     * And the page renders on BLACK, which is transparent on the waveguide.
+     * A dark thumbnail would project as very nearly nothing, so the capture
+     * is composited over a light backdrop first — the thumbnail has to read
+     * as an object on the HUD, not as a faint smudge.
+     */
+    fun captureThumbnail(maxWidth: Int = THUMB_MAX_WIDTH): android.graphics.Bitmap? {
+        val w = webView.width
+        val h = webView.height
+        if (w <= 0 || h <= 0) return null
+        val previousLayer = webView.layerType
+        return runCatching {
+            webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+            val full = android.graphics.Bitmap.createBitmap(
+                w, h, android.graphics.Bitmap.Config.ARGB_8888
+            )
+            android.graphics.Canvas(full).also { c ->
+                c.drawColor(THUMB_BACKDROP)
+                webView.draw(c)
+            }
+            if (w <= maxWidth) return@runCatching full
+            val scaled = android.graphics.Bitmap.createScaledBitmap(
+                full, maxWidth, (h.toFloat() * maxWidth / w).toInt().coerceAtLeast(1), true
+            )
+            if (scaled !== full) full.recycle()
+            scaled
+        }.onFailure {
+            Log.w(TAG, "thumbnail capture failed: ${it.message}")
+        }.also {
+            // Restore before anything can draw a frame, or the second eye
+            // goes blank for as long as the layer is wrong.
+            runCatching { webView.setLayerType(previousLayer, null) }
+        }.getOrNull()
+    }
+
     /** Host callbacks for page text fields; set by the activity. */
     var onPageInputFocus: ((String) -> Unit)? = null
     var onPageInputBlur: (() -> Unit)? = null
@@ -261,6 +311,10 @@ class BrowserWindowView @JvmOverloads constructor(
         fun onInputBlur() {
             post { onPageInputBlur?.invoke() }
         }
+    }
+
+    private fun injectImageFit() {
+        runCatching { webView.evaluateJavascript(IMAGE_FIT_JS, null) }
     }
 
     private fun injectInputHooks() {
@@ -523,6 +577,7 @@ class BrowserWindowView @JvmOverloads constructor(
                 injectPolyfills()
                 injectSiteChromeFilters()
                 injectInputHooks()
+                injectImageFit()
                 onPageStartedListener?.invoke(url)
             }
 
@@ -540,6 +595,7 @@ class BrowserWindowView @JvmOverloads constructor(
                 injectPolyfills()
                 injectSiteChromeFilters()
                 injectInputHooks()
+                injectImageFit()
                 restoreScrollAfterResize()
                 if (BuildConfig.DEBUG) {
                     view?.evaluateJavascript(
@@ -875,6 +931,20 @@ class BrowserWindowView @JvmOverloads constructor(
         private const val TAG = "X3HubBrowserWindow"
 
         /**
+         * Thumbnail width in px. Twice the ~72px the bookmark pin draws at,
+         * so it stays crisp and still costs about 12KB as JPEG.
+         */
+        const val THUMB_MAX_WIDTH = 144
+
+        /**
+         * Backdrop composited under a captured page. Not black: black is
+         * transparent on this waveguide, and a bookmark that projects as
+         * nothing is not a bookmark. Light enough that dark page text lands
+         * on it legibly.
+         */
+        const val THUMB_BACKDROP = 0xFFE8E8E8.toInt()
+
+        /**
          * The page-side half of edge scrolling: a velocity the document
          * applies on its own animation frames.
          *
@@ -890,6 +960,55 @@ class BrowserWindowView @JvmOverloads constructor(
          * cursor parked at the rim after hitting the end of the article, and
          * there is no reason to keep an animation callback alive for that.
          */
+        /**
+         * Frame a standalone image to the window.
+         *
+         * Following an image result out of a search lands on a bare image
+         * document, which the engine lays out at the picture's NATIVE size.
+         * On a 170px-wide window a 2000px photo arrives as a meaningless
+         * crop of its top-left corner, and the wearer has no way to zoom
+         * out. Fitting it to the viewport is what makes "open that image"
+         * mean anything here.
+         *
+         * Scoped to documents that are ONLY an image — an article's photos
+         * must keep the layout the page gave them.
+         */
+        private val IMAGE_FIT_JS = """
+            (function(){
+              function isImageDocument(){
+                var b = document.body;
+                if (!b) return false;
+                if (b.children.length !== 1) return false;
+                var only = b.firstElementChild;
+                return !!only && only.tagName === 'IMG';
+              }
+              function fit(){
+                try {
+                  if (!isImageDocument()) return;
+                  var id = 'x3-image-fit';
+                  if (document.getElementById(id)) return;
+                  var st = document.createElement('style');
+                  st.id = id;
+                  st.textContent =
+                    'html,body{margin:0!important;padding:0!important;height:100%!important;' +
+                    'overflow:hidden!important;background:#000!important;}' +
+                    'body{display:flex!important;align-items:center!important;' +
+                    'justify-content:center!important;}' +
+                    'img{max-width:100%!important;max-height:100vh!important;' +
+                    'width:auto!important;height:auto!important;object-fit:contain!important;}';
+                  (document.head || document.documentElement).appendChild(st);
+                } catch (e) {}
+              }
+              fit();
+              // The <img> is not in the DOM yet at page-start injection, and
+              // the engine also re-lays-out once the real dimensions arrive.
+              document.addEventListener('DOMContentLoaded', fit);
+              window.addEventListener('load', fit);
+              setTimeout(fit, 300);
+              setTimeout(fit, 1200);
+            })();
+        """.trimIndent()
+
         private val EDGE_SCROLL_JS = """
             (function(){
               if (window.__x3EdgeScroll) return;

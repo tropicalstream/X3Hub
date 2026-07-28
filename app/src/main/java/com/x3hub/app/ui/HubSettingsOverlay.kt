@@ -13,6 +13,9 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.x3hub.app.core.tools.BrowserTool
+import com.x3hub.app.core.bridge.HudPinStore
+import com.x3hub.app.core.bridge.BookmarkStore
 import com.x3hub.app.core.config.ApiKeyStore
 import com.x3hub.app.core.config.HubPrefs
 import com.x3hub.app.core.config.KeyFile
@@ -264,7 +267,7 @@ class HubSettingsOverlay(
         col.addView(row)
 
         col.addView(buildBargeInRow())
-        col.addView(pasteHelpBox())
+        col.addView(bookmarksBox())
         return col
     }
 
@@ -366,42 +369,123 @@ class HubSettingsOverlay(
         }
     }
 
-    private fun pasteHelpBox(): View {
+    /**
+     * Saved pages, with Open and ✕ per row.
+     *
+     * This replaced the "Paste a key from a computer" help box, which was
+     * only ever prose: the adb command it printed is repeated on each key's
+     * own detail page, and every route to entering a key (type, paste,
+     * clear) lives there. Nothing was lost by taking the space.
+     *
+     * There is no scrolling anywhere in this overlay and none is possible —
+     * taps arrive as a synthetic down+up at a single point, so nothing can
+     * be dragged. So the list shows the newest few and says how many more
+     * there are, rather than pretending to be a browsable library. The
+     * assistant can list them all aloud.
+     */
+    private fun bookmarksBox(): View {
+        BookmarkStore.init(activity)
         val box = LinearLayout(activity)
         box.orientation = LinearLayout.VERTICAL
         box.layoutParams = LinearLayout.LayoutParams(MATCH, 0, 1f).apply { topMargin = 6 }
         box.setPadding(10, 8, 10, 8)
         box.background = boxBg(fill = 0x14FFFFFF, stroke = 0x66FFFFFF, strokeW = 1)
 
-        box.addView(label("Paste a key from a computer", 16f, ACCENT, bold = true))
-        box.addView(
-            label(
-                "Keys are long and case-sensitive, so adb is the reliable route. " +
-                    "Put the key in a text file and push it — it is picked up on the " +
-                    "next call, no restart:",
-                14f, DIM
-            ).apply {
-                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 4 }
+        fun render() {
+            box.removeAllViews()
+            val all = BookmarkStore.all()
+            box.addView(
+                label(
+                    if (all.isEmpty()) "Bookmarks" else "Bookmarks (${all.size})",
+                    16f, ACCENT, bold = true
+                )
+            )
+            if (all.isEmpty()) {
+                box.addView(
+                    label(
+                        "Open a page, activate it with one click, then say " +
+                            "\"pin this page\" — it is saved here with a thumbnail.",
+                        14f, DIM
+                    ).apply {
+                        layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+                            .apply { topMargin = 4 }
+                    }
+                )
+                return
             }
-        )
-        box.addView(
-            label(
-                "adb push gemini_api_key.txt \\\n  $filesDirPath/gemini_api_key.txt",
-                14f, Color.WHITE, mono = true
-            ).apply {
-                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
+            all.take(BOOKMARK_ROWS).forEach { bm -> box.addView(bookmarkRow(bm) { render() }) }
+            if (all.size > BOOKMARK_ROWS) {
+                box.addView(
+                    label(
+                        "+${all.size - BOOKMARK_ROWS} more — ask to list them, " +
+                            "or say \"forget\" a title.",
+                        13f, DIM
+                    ).apply {
+                        layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
+                            .apply { topMargin = 4 }
+                    }
+                )
             }
-        )
-        box.addView(
-            label(
-                "Tap a key above for that key's exact commands, or to type it here.",
-                14f, DIM
-            ).apply {
-                layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
-            }
-        )
+        }
+        render()
         return box
     }
+
+    private fun bookmarkRow(bm: BookmarkStore.Bookmark, onChanged: () -> Unit): View {
+        val row = LinearLayout(activity)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.layoutParams = LinearLayout.LayoutParams(MATCH, TAP_MIN).apply { topMargin = 4 }
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.background = boxBg(fill = 0x14FFFFFF, stroke = 0x40FFFFFF, strokeW = 1)
+        row.setPadding(8, 0, 4, 0)
+        // Without this the row is an inert surface: the tap is swallowed and
+        // nothing happens, which reads on the glasses as a dead control.
+        row.isClickable = true
+        row.setOnClickListener { openBookmark(bm) }
+
+        row.addView(
+            label(bm.title, 15f, Color.WHITE).apply {
+                layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+        )
+        // Nested clickables win over the row only where the cursor is over
+        // them — the hit-test returns the deepest interactive descendant.
+        row.addView(button("Open", 72) { openBookmark(bm) })
+        row.addView(
+            button("✕", TAP_MIN) {
+                BookmarkStore.remove(bm.id)
+                // The HUD pin for this page, if it is on the board, points at
+                // the thumbnail file just deleted — take it down with it.
+                HudPinStore.init(activity)
+                HudPinStore.all()
+                    .filter { it.type == HudPinStore.TYPE_BOOKMARK && it.sourceUrl == bm.url }
+                    .forEach { HudPinStore.remove(it.id) }
+                showToast("Removed ${bm.title}")
+                onChanged()
+            }
+        )
+        return row
+    }
+
+    private fun openBookmark(bm: BookmarkStore.Bookmark) {
+        HudPinStore.init(activity)
+        val opened = HudPinStore.add(
+            HudPinStore.HudPin(
+                type = BrowserTool.TYPE_BROWSER,
+                label = bm.title,
+                payload = bm.url
+            )
+        )
+        if (!opened) {
+            showToast("The HUD board is full — remove a pin first.")
+            return
+        }
+        // Get out of the way: the window opens behind this panel.
+        hide()
+    }
+
 
     // ------------------------------------------------------------------
     // Key detail page
@@ -819,6 +903,8 @@ class HubSettingsOverlay(
         private const val PAD = 8
         /** Minimum touch target; the cursor is a trackpad estimate, not a finger. */
         private const val TAP_MIN = 44
+        /** Rows that fit the panel's remaining height without scrolling. */
+        private const val BOOKMARK_ROWS = 4
         private const val CARD_H = 138
 
         private const val ACCENT = 0xFF7FDBFF.toInt()   // HUD cyan

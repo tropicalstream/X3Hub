@@ -32,7 +32,11 @@ class ToolDispatcher(
         // view — it runs on a voice-tool coroutine with no activity — so it
         // goes through HudPinStore exactly as HudPinTool does.
         BrowserTool(context),
-        PageAgentTool(context)
+        PageAgentTool(context),
+        // Saving a page needs a picture of it, which means drawing a live
+        // View — so unlike every tool above, this one hands the job to the
+        // activity through BookmarkBridge and waits for the answer.
+        BookmarkTool(context)
     ).associateBy { it.name }
 
     fun isSupported(name: String): Boolean = tools.containsKey(name.trim())

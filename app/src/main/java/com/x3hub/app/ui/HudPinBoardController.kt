@@ -345,6 +345,7 @@ class HudPinBoardController(
         val container = FrameLayout(activity)
         val content: View = when (pin.type) {
             HudPinStore.TYPE_PICTURE -> buildPictureContent(pin)
+            HudPinStore.TYPE_BOOKMARK -> buildBookmarkContent(pin)
             HudPinStore.TYPE_LIVE -> buildLiveContent(pin)
             HudPinStore.TYPE_COUNTDOWN -> buildCountdownContent(pin)
             BrowserTool.TYPE_BROWSER -> browserWindowFor(pin)
@@ -362,6 +363,9 @@ class HudPinBoardController(
             // clickable hit target far beyond short text.
             HudPinStore.TYPE_NOTE -> measureContent(content, dp(NOTE_MAX_WIDTH_DP))
             HudPinStore.TYPE_PICTURE -> dp(64) to dp(48)
+            // Portrait, because the pages are: the windows themselves are a
+            // 3:4 ladder, and a landscape box would letterbox every capture.
+            HudPinStore.TYPE_BOOKMARK -> dp(66) to dp(96)
             HudPinStore.TYPE_LIVE -> measureContent(content, dp(LIVE_MAX_WIDTH_DP))
             // One line of label + time — deliberately small, a countdown is
             // glanceable status, not content.
@@ -572,9 +576,71 @@ class HudPinBoardController(
         return iv
     }
 
+    /**
+     * Thumbnail with the page's name under it. The label matters more here
+     * than on a picture pin: at 66px wide a shrunken web page is a coloured
+     * smudge, and the title is what the wearer actually reads.
+     */
+    private fun buildBookmarkContent(pin: HudPin): View {
+        val col = LinearLayout(activity)
+        col.orientation = LinearLayout.VERTICAL
+        col.background = GradientDrawable().apply {
+            setColor(0xFF10181E.toInt())
+            setStroke(dp(1), 0xCC7FDBFF.toInt())
+            cornerRadius = 2f * density
+        }
+        col.setPadding(dp(1), dp(1), dp(1), dp(1))
+
+        val iv = ImageView(activity)
+        iv.scaleType = ImageView.ScaleType.CENTER_CROP
+        iv.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        )
+        loadPinBitmap(pin) { bmp -> iv.setImageBitmap(bmp) }
+        col.addView(iv)
+
+        val title = TextView(activity)
+        title.text = pin.label
+        title.setTextColor(0xFFDDEEFF.toInt())
+        title.textSize = 9f
+        title.maxLines = 2
+        title.ellipsize = android.text.TextUtils.TruncateAt.END
+        title.setPadding(dp(2), dp(1), dp(2), dp(1))
+        title.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+        col.addView(title)
+        return col
+    }
+
+    /** Reopen a saved page in a browser window. */
+    private fun openBookmark(pin: HudPin) {
+        val url = pin.sourceUrl?.takeIf { it.isNotBlank() }
+        if (url == null) {
+            showToast("That bookmark has no address saved.")
+            return
+        }
+        // Straight through the store, exactly as BrowserTool does — the
+        // board's own observer inflates the WebView. A second route to a
+        // browser window would be a second place for them to fall out of
+        // sync.
+        val opened = HudPinStore.add(
+            HudPinStore.HudPin(
+                type = BrowserTool.TYPE_BROWSER,
+                label = pin.label,
+                payload = url
+            )
+        )
+        if (!opened) showToast("The HUD board is full — remove a pin first.")
+        else forceCursorVisible()
+    }
+
     private fun openPin(pin: HudPin) {
         when (pin.type) {
             HudPinStore.TYPE_PICTURE -> showFullscreenPicture(pin)
+            // A bookmark you can only look at would be pointless — tapping
+            // one reopens the page, which is the whole reason it was saved.
+            HudPinStore.TYPE_BOOKMARK -> openBookmark(pin)
             HudPinStore.TYPE_LIVE -> {
                 // No browser to open a source page in — tap = refresh now.
                 HudPinStore.requestRefresh(pin.id)

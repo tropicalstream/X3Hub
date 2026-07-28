@@ -81,6 +81,10 @@ class GeminiLiveClient(
                 "describing the page aloud. Pass 'url' when a specific site is named, or " +
                 "'query' to search. The window opens inert; say in one short sentence that it " +
                 "is open and that a single click activates it.\n" +
+                "- bookmark_page: SAVE THE PAGE THE USER IS LOOKING AT, with a thumbnail, " +
+                "and pin it to the display ('pin this page', 'bookmark this', 'save that'). " +
+                "It always acts on the window they have activated, so never ask which page " +
+                "they mean. Also 'list' what is saved, or 'remove' one by title.\n" +
                 "- Web search grounding is available for current information.\n\n" +
                 "CONSTRAINTS:\n" +
                 "- Do not read URLs aloud — open them with the browser tool instead.\n" +
@@ -513,6 +517,24 @@ class GeminiLiveClient(
                         .put("description", "The page to open: a full https URL or a bare host like 'wikipedia.org'."))
                     .put("query", JSONObject().put("type", "STRING")
                         .put("description", "What to search for, in plain language, when no specific site is named.")))))
+
+        tools.put(JSONObject()
+            .put("name", "bookmark_page")
+            .put("description",
+                "Save the web page the user is currently looking at, with a picture of it, " +
+                    "and pin it to the heads-up display. Use for 'pin this page', 'bookmark " +
+                    "this', 'save that page', 'remember this page'. Takes no target: it " +
+                    "always acts on the window the user has activated, so do NOT ask which " +
+                    "page they mean. Pass action='list' to tell them what they have saved, " +
+                    "or action='remove' with 'title' to forget one. Saving takes a couple of " +
+                    "seconds; after it returns, repeat what it says in one short sentence.")
+            .put("parameters", JSONObject()
+                .put("type", "OBJECT")
+                .put("properties", JSONObject()
+                    .put("action", JSONObject().put("type", "STRING")
+                        .put("description", "'save' (default), 'list', or 'remove'."))
+                    .put("title", JSONObject().put("type", "STRING")
+                        .put("description", "Which saved page to forget, when action is 'remove'.")))))
 
         tools.put(JSONObject()
             .put("name", "page_agent")

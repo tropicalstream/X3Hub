@@ -34,6 +34,15 @@ object HudPinStore {
     const val TYPE_PICTURE = "picture"
 
     /**
+     * A saved web page: [HudPin.payload] is the thumbnail's file path (so
+     * the picture loader works on it unchanged) and [HudPin.sourceUrl] is
+     * the page to reopen when it is tapped. The library entry itself lives
+     * in BookmarkStore — this pin is only its presence on the HUD, and
+     * removing the pin does not forget the bookmark.
+     */
+    const val TYPE_BOOKMARK = "bookmark"
+
+    /**
      * Live card — [payload] is a natural-language WATCH QUERY ("Warriors
      * score", "top AI headline", "new trending Rust repos", "changes to
      * <page>"), optionally scoped to [HudPin.sourceUrl]. The
