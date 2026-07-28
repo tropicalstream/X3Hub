@@ -48,6 +48,7 @@ import com.x3hub.app.core.agent.AgentTaskBridge
 import com.x3hub.app.core.agent.AgentVoice
 import com.x3hub.app.core.web.AdBlock
 import com.x3hub.app.core.agent.PageAgentController
+import com.x3hub.app.core.agent.PageCommands
 import com.x3hub.app.ui.HubSettingsOverlay
 import com.x3hub.app.ui.HudPinBoardController
 
@@ -179,8 +180,51 @@ class MainActivity : AppCompatActivity() {
                 showNotice(error ?: "Didn't catch that.")
                 return@transcribe
             }
-            showNotice("Agent: ${text.take(46)}")
-            agentFor(window).run(text)
+            dispatchPageCommand(text, window)
+        }
+    }
+
+    /**
+     * Route a spoken instruction. Browsing, scrolling and plain search are
+     * done by the app; only what is genuinely the agent's reaches it.
+     *
+     * This is the difference between "it opened archive.org but never played
+     * anything" and it working: the agent has no navigate tool and its own
+     * prompt tells it to stay on the page, so a browsing instruction sent to
+     * it costs a slow model round trip and then fails.
+     */
+    private fun dispatchPageCommand(text: String, window: BrowserWindowView) {
+        when (val outcome = PageCommands.route(text, window)) {
+            is PageCommands.Outcome.Handled -> showNotice(outcome.notice)
+            is PageCommands.Outcome.StopAgent -> {
+                pageAgents[window]?.stop()
+                AgentSpeech.stop()
+                showNotice("Stopped.")
+            }
+            is PageCommands.Outcome.SearchInPage -> searchInPage(outcome.query, window, retried = false)
+            is PageCommands.Outcome.ForAgent -> {
+                showNotice("Agent: ${outcome.task.take(46)}")
+                agentFor(window).run(outcome.task)
+            }
+        }
+    }
+
+    /** Drive the page's own search box; fall back to the web if it has none. */
+    private fun searchInPage(query: String, window: BrowserWindowView, retried: Boolean) {
+        window.evaluateJavascript(PageCommands.searchInPageJs(query)) { result ->
+            when {
+                result != null && result.contains("ok") ->
+                    showNotice("Searching this site for ${query.take(32)}")
+                // The box was collapsed behind a magnifier and we just clicked
+                // it open; give the DOM a moment, then fill it in.
+                result != null && result.contains("opened") && !retried ->
+                    uiHandler.postDelayed({ searchInPage(query, window, retried = true) }, 500L)
+                else -> {
+                    // No search box here — a web search beats doing nothing.
+                    window.loadUrl(PageCommands.searchUrl(query, google = false))
+                    showNotice("Searching the web for ${query.take(32)}")
+                }
+            }
         }
     }
 
@@ -327,7 +371,7 @@ class MainActivity : AppCompatActivity() {
                         ?.firstOrNull { it.isActive }
                         ?: hudPinBoardController?.browserWindows()?.firstOrNull()
                     Log.i(TAG, "DEBUG task window=${w != null}: $t")
-                    if (w == null) showNotice("No window open.") else agentFor(w).run(t)
+                    if (w == null) showNotice("No window open.") else dispatchPageCommand(t, w)
                     return
                 }
                 if (intent?.getStringExtra("adblock") != null) {

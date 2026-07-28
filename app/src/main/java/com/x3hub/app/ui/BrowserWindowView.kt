@@ -163,6 +163,48 @@ class BrowserWindowView @JvmOverloads constructor(
         }
     }
 
+    // ── Navigation the AGENT cannot do ────────────────────────────────
+    // page-agent has no navigate tool and its prompt tells it to stay put,
+    // so browsing has to be the app's job.
+
+    fun goForward() { if (webView.canGoForward()) webView.goForward() }
+    fun reload() { webView.reload() }
+
+    /**
+     * Scroll by JS rather than by synthesising a drag: a drag lands on
+     * whatever is under the cursor, and plenty of pages put their content in
+     * an inner scrolling pane where the document itself never moves. A huge
+     * delta saturates whichever box actually scrolls, which is what makes
+     * "go to the bottom" work on those pages.
+     */
+    fun scrollByJs(dy: Int) {
+        webView.evaluateJavascript(
+            """
+            (function(dy){
+              function scrollable(el){
+                if (!el) return false;
+                var s = getComputedStyle(el);
+                return /auto|scroll/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 4;
+              }
+              var best = null, bestArea = 0;
+              var all = document.querySelectorAll('*');
+              for (var i = 0; i < all.length && i < 4000; i++){
+                var e = all[i];
+                if (!scrollable(e)) continue;
+                var r = e.getBoundingClientRect();
+                var a = r.width * r.height;
+                if (a > bestArea){ bestArea = a; best = e; }
+              }
+              var docH = document.documentElement.scrollHeight;
+              if (best && bestArea > (innerWidth * innerHeight * 0.4) &&
+                  docH <= innerHeight + 4) { best.scrollBy(0, dy); }
+              else { window.scrollBy(0, dy); }
+            })($dy);
+            """.trimIndent(),
+            null
+        )
+    }
+
     /** Probe: run arbitrary JS in the page and log the result. */
     fun debugEval(js: String) {
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
