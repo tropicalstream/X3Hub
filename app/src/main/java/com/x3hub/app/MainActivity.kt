@@ -2072,6 +2072,14 @@ class MainActivity : AppCompatActivity() {
         if (window != null) {
             return window.isActive && hudPinBoardController?.isInModifyMode() != true
         }
+        // Any other pin carries two meanings too: one tap OPENS it (a picture
+        // goes fullscreen, a bookmark loads its page) and three enter MODIFY
+        // to move or delete it. Firing the single immediately meant a
+        // triple-tap to move a picture opened the viewer first and the move
+        // never happened. Not while already modifying — there the next tap is
+        // the move itself and must land at once.
+        if (hudPinBoardController?.isInModifyMode() == true) return false
+        return hudPinBoardController?.pinAt(point.first, point.second) != null
         // Empty space means BOTH "start Gemini" (one tap) and "open settings"
         // (three). Firing the first immediately meant every triple-tap for
         // settings also opened a voice session behind it — connecting, greeting

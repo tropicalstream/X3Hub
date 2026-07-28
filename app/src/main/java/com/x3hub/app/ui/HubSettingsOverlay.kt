@@ -294,16 +294,16 @@ class HubSettingsOverlay(
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
         row.background = boxBg(fill = 0x14FFFFFF, stroke = 0x40FFFFFF, strokeW = 1)
-        row.setPadding(10, 6, 10, 6)
+        row.setPadding(10, 2, 10, 2)
         row.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
 
-        val text = LinearLayout(activity)
-        text.orientation = LinearLayout.VERTICAL
-        text.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
-        text.addView(label("Web knowledge", 16f, ACCENT, bold = true))
-        val sub = label("", 13f, DIM).apply { maxLines = 2 }
-        text.addView(sub)
-        row.addView(text)
+        row.addView(
+            label("Web knowledge", 15f, ACCENT, bold = true).apply {
+                layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                maxLines = 1
+            }
+        )
+        val sub = label("", 13f, DIM)   // retained: render() writes it
 
         lateinit var toggle: TextView
         fun render() {
@@ -335,16 +335,19 @@ class HubSettingsOverlay(
         row.orientation = LinearLayout.HORIZONTAL
         row.gravity = Gravity.CENTER_VERTICAL
         row.background = rowBg
-        row.setPadding(10, 6, 10, 6)
+        row.setPadding(10, 2, 10, 2)
         row.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
 
-        val text = LinearLayout(activity)
-        text.orientation = LinearLayout.VERTICAL
-        text.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
-        text.addView(label("Interrupting Gemini", 16f, ACCENT, bold = true))
-        val sub = label("", 13f, DIM).apply { maxLines = 2 }
-        text.addView(sub)
-        row.addView(text)
+        // Title only. The explanation used to sit under it on two wrapped
+        // lines, costing ~40px of a 480px panel to restate what the button
+        // already says — and it is read once, then never again.
+        row.addView(
+            label("Interrupting Gemini", 15f, ACCENT, bold = true).apply {
+                layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                maxLines = 1
+            }
+        )
+        val sub = label("", 13f, DIM)   // retained: render() writes it
 
         // The button shows the state, and tapping it changes to the other —
         // one control, no separate on/off indicator to fall out of sync.
@@ -966,7 +969,7 @@ class HubSettingsOverlay(
         /** Minimum touch target; the cursor is a trackpad estimate, not a finger. */
         private const val TAP_MIN = 44
         /** Rows that fit the panel's remaining height without scrolling. */
-        private const val BOOKMARK_ROWS = 6
+        private const val BOOKMARK_ROWS = 8
         private const val CARD_H = 34
 
         private const val ACCENT = 0xFF7FDBFF.toInt()   // HUD cyan

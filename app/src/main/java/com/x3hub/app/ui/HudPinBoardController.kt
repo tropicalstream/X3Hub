@@ -425,6 +425,18 @@ class HudPinBoardController(
         browserWindows.entries.map { it.key to it.value }
 
     /** The pin id backing a window, so a caller can close it via the store. */
+    /** The pin under a screen point, if any. */
+    fun pinAt(screenX: Float, screenY: Float): String? {
+        val loc = IntArray(2)
+        pinViews.forEach { (id, v) ->
+            v.getLocationOnScreen(loc)
+            if (screenX >= loc[0] && screenX < loc[0] + v.width &&
+                screenY >= loc[1] && screenY < loc[1] + v.height
+            ) return id
+        }
+        return null
+    }
+
     fun pinIdFor(window: BrowserWindowView): String? =
         browserWindows.entries.firstOrNull { it.value === window }?.key
 
@@ -717,6 +729,14 @@ class HudPinBoardController(
         // board's own observer inflates the WebView. A second route to a
         // browser window would be a second place for them to fall out of
         // sync.
+        // HudPinStore.add dedupes on type+payload and keeps the EXISTING pin
+        // — including its lastUrl. So a window already opened on this address
+        // that the wearer has since browsed away from is silently reused and
+        // shows wherever it wandered to, which reads as "the bookmark opened
+        // the wrong page". Send it back to the bookmark explicitly.
+        val existing = HudPinStore.all().firstOrNull {
+            it.type == BrowserTool.TYPE_BROWSER && it.payload == url
+        }
         val opened = HudPinStore.add(
             HudPinStore.HudPin(
                 type = BrowserTool.TYPE_BROWSER,
@@ -724,8 +744,15 @@ class HudPinBoardController(
                 payload = url
             )
         )
-        if (!opened) showToast("The HUD board is full — remove a pin first.")
-        else forceCursorVisible()
+        if (!opened) {
+            showToast("The HUD board is full — remove a pin first.")
+            return
+        }
+        if (existing != null) {
+            HudPinStore.updateBrowserResume(existing.id, url, null)
+            browserWindows[existing.id]?.loadUrl(url)
+        }
+        forceCursorVisible()
     }
 
     private fun openPin(pin: HudPin) {
