@@ -40,6 +40,7 @@ import com.x3hub.app.core.bridge.ChatCardBridge
 import com.x3hub.app.core.bridge.HudStateBridge
 import com.x3hub.app.core.bridge.VoiceServiceApi
 import androidx.lifecycle.lifecycleScope
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.ui.BrowserWindowView
@@ -227,7 +228,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         window.deactivate()
-        if (draggingWindow === window) finishWindowDrag(cancelled = true)
+        stopEdgeScroll()
         setCursorVisible(true)
         Log.i(TAG, "Page command complete — browser released and cursor owns touchpad")
     }
@@ -297,6 +298,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showOnScreenKeyboard(window: BrowserWindowView) {
+        stopEdgeScroll()
         suppressImeFor(1500L)
         keyboardOwner = window
         val overlay = findViewById<FrameLayout?>(R.id.unipanelOverlay) ?: return
@@ -330,17 +332,13 @@ class MainActivity : AppCompatActivity() {
         keyboardOwner = null
         owner?.defocusField()
 
-        // Keyboard dismissal is also the input handoff back to the hub. If the
-        // page stays ACTIVE, activeWindowOwnsGestures() immediately takes the
-        // next slide away from the cursor and turns it into a page drag. That
-        // feels like the pointer died at exactly the moment the keyboard went
-        // away. Releasing only the keyboard's owner keeps other windows
-        // untouched and makes every dismissal path (hide key, Enter, timeout,
-        // or a tap above the keyboard) end in the same usable state.
-        owner?.deactivate()
-        finishWindowDrag(cancelled = true)
+        // The window deliberately stays ACTIVE: the cursor is free either
+        // way now, and keeping it active means the wearer can read what they
+        // just searched for by dropping straight to the bottom edge instead
+        // of tapping the window awake again first.
         setCursorVisible(true)
-        Log.i(TAG, "Keyboard hidden — browser released and cursor owns touchpad")
+        updateEdgeScroll()
+        Log.i(TAG, "Keyboard hidden")
     }
 
     private val keyboardActions = object : CustomKeyboardView.OnKeyboardActionListener {
@@ -624,6 +622,7 @@ class MainActivity : AppCompatActivity() {
         // Pause each page individually. WebView.pauseTimers() would be the
         // obvious call and is exactly wrong here: it is process-global, so one
         // window pausing would freeze every other window's JavaScript too.
+        stopEdgeScroll()
         hudPinBoardController?.browserWindows()?.forEach { it.onHostPause() }
     }
 
@@ -1110,7 +1109,7 @@ class MainActivity : AppCompatActivity() {
             // dropping the map entry without destroy() would keep both alive.
             pageAgents.remove(w)?.destroy()
             if (modifyingWindow === w) modifyingWindow = null
-            if (draggingWindow === w) draggingWindow = null
+            if (edgeWindow === w) stopEdgeScroll()
         }
 
         hubSettingsOverlay = HubSettingsOverlay(
@@ -1319,14 +1318,11 @@ class MainActivity : AppCompatActivity() {
                     droppedFirstDelta = true
                     return
                 }
-                // Inside an ACTIVE window the page owns the gestures. The
-                // cursor deliberately stops wandering there — it would only
-                // be a second thing moving on top of a page that is already
-                // scrolling — and the slide becomes the page's drag instead.
-                if (activeWindowOwnsGestures()) {
-                    if (rightArmTouchMoved) forwardDragToActiveWindow(dx, dy)
-                    return
-                }
+                // The cursor is never taken away. Pages used to claim the
+                // slide inside an active window so they could scroll, which
+                // froze the pointer wherever it happened to be — and on a
+                // display you aim with, a frozen pointer reads as a dead
+                // device. Scrolling is the edge bands' job now.
                 moveCursorBy(dx * cursorGain, dy * cursorGain)
             }
             MotionEvent.ACTION_UP -> {
@@ -1335,9 +1331,6 @@ class MainActivity : AppCompatActivity() {
                 rightArmTouchTracking = false
                 if (!tracking) return
                 if (moved) {
-                    // A drag that went to the page ends there; it is not also
-                    // a candidate for the dim pull.
-                    if (finishWindowDrag(cancelled = false)) return
                     maybeHandleEdgePull(ev)
                     return
                 }
@@ -1348,7 +1341,6 @@ class MainActivity : AppCompatActivity() {
             }
             MotionEvent.ACTION_CANCEL -> {
                 rightArmTouchTracking = false
-                finishWindowDrag(cancelled = true)
             }
         }
     }
@@ -1356,81 +1348,81 @@ class MainActivity : AppCompatActivity() {
     private var lastTrackpadX = 0f
     private var lastTrackpadY = 0f
 
-    // ── Page drag (scrolling inside an active window) ────────────────
-    private var draggingWindow: BrowserWindowView? = null
-    private var dragLocalX = 0f
-    private var dragLocalY = 0f
-    private var dragDownTimeMs = 0L
+    // ── Edge scrolling ───────────────────────────────────────────────
+    //
+    // Park the cursor near an active window's top or bottom rim and the page
+    // scrolls; move away and it stops. This replaces drag-to-scroll, which
+    // could only work by freezing the pointer.
+    //
+    // Two details carry the whole feel. The speed ramps with the SQUARE of
+    // how far into the band the cursor sits, starting from nothing at the
+    // inner boundary — so resting near the rim to read a link creeps at a few
+    // px/s and the link stays clickable, while pushing to the very edge is a
+    // fast scroll. And a short dwell has to pass before anything moves, so
+    // crossing a band on the way somewhere else does not jog the page.
+    private var edgeWindow: BrowserWindowView? = null
+    private var edgeVelocity = 0f
+    private var edgeArmed = false
 
-    /**
-     * True while a window has the input and is not being moved/resized.
-     * Modify mode is excluded because there the sideways swipe is the
-     * resize gesture, and both cannot claim the same slide.
-     *
-     * The on-screen keyboard is excluded for a blunter reason: its keys are
-     * reached by pointing at them, so if the page kept the slide the cursor
-     * would stay frozen wherever the field happened to be and NO key would
-     * ever be reachable. The window stays active throughout (that is what
-     * keeps the field focused and the dim pull suppressed) — only the
-     * cursor freeze lifts. Scrolling the page therefore means putting the
-     * keyboard away first, which is a tap above it.
-     */
-    private fun activeWindowOwnsGestures(): Boolean {
-        val c = hudPinBoardController ?: return false
-        if (c.isInModifyMode()) return false
-        if (keyboardView?.visibility == View.VISIBLE) return false
-        return c.browserWindows().any { it.isActive }
+    private val edgeDwellRunnable = Runnable {
+        edgeArmed = true
+        edgeWindow?.setEdgeScrollVelocity(edgeVelocity)
     }
 
-    /**
-     * Turn trackpad deltas into a touch drag on the page. Forwarding is 1:1
-     * so the page behaves exactly like a phone under a finger — a scroll of
-     * n pad units is n page px, and flings/overscroll come free from the
-     * WebView rather than being re-simulated here.
-     *
-     * Nothing is forwarded until the touch has already disqualified itself
-     * as a tap, so clicks still take the untouched tap path.
-     */
-    private fun forwardDragToActiveWindow(dx: Float, dy: Float) {
-        val window = draggingWindow ?: run {
-            val w = hudPinBoardController?.browserWindows()
-                ?.firstOrNull { it.isActive } ?: return
-            val origin = IntArray(2)
-            w.getLocationOnScreen(origin)
-            val pt = cursorInteractionPoint()
-            dragLocalX = pt.first - origin[0]
-            dragLocalY = pt.second - origin[1]
-            dragDownTimeMs = SystemClock.uptimeMillis()
-            draggingWindow = w
-            sendDragEvent(w, MotionEvent.ACTION_DOWN)
-            w
+    /** The window and velocity the cursor is currently asking for, if any. */
+    private fun edgeScrollRequest(): Pair<BrowserWindowView, Float>? {
+        if (hubSettingsOverlay?.isShowing == true) return null
+        // While the keyboard is up the wearer is typing, and scrolling would
+        // drag the field they are typing into off the screen.
+        if (keyboardView?.visibility == View.VISIBLE) return null
+        val c = hudPinBoardController ?: return null
+        if (c.isInModifyMode()) return null
+        val pt = cursorInteractionPoint()
+        // Only the ACTIVE window scrolls. Any window under the cursor would
+        // mean a background page creeping whenever the wearer rests the
+        // pointer over it on the way somewhere else.
+        val w = c.browserWindowAt(pt.first, pt.second)?.takeIf { it.isActive } ?: return null
+        val loc = IntArray(2)
+        w.getLocationOnScreen(loc)
+        val fromTop = pt.second - loc[1]
+        val fromBottom = (loc[1] + w.height) - pt.second
+        val depth: Float
+        val direction: Float
+        when {
+            fromTop < EDGE_BAND_PX -> { depth = EDGE_BAND_PX - fromTop; direction = -1f }
+            fromBottom < EDGE_BAND_PX -> { depth = EDGE_BAND_PX - fromBottom; direction = 1f }
+            else -> return null
         }
-        dragLocalX += dx
-        dragLocalY += dy
-        sendDragEvent(window, MotionEvent.ACTION_MOVE)
+        val t = (depth / EDGE_BAND_PX).coerceIn(0f, 1f)
+        // Quantised so a slide inside the band does not fire a bridge call per
+        // motion event; the page is animating itself between updates anyway.
+        val stepped = ((direction * EDGE_MAX_PX_PER_S * t * t) / EDGE_SPEED_STEP)
+            .roundToInt() * EDGE_SPEED_STEP
+        if (stepped == 0f) return null
+        return w to stepped
     }
 
-    /** Close an in-flight page drag. Returns true if there was one. */
-    private fun finishWindowDrag(cancelled: Boolean): Boolean {
-        val w = draggingWindow ?: return false
-        draggingWindow = null
-        sendDragEvent(
-            w,
-            if (cancelled) MotionEvent.ACTION_CANCEL else MotionEvent.ACTION_UP
-        )
-        return true
-    }
-
-    private fun sendDragEvent(w: BrowserWindowView, action: Int) {
-        val ev = MotionEvent.obtain(
-            dragDownTimeMs, SystemClock.uptimeMillis(),
-            action, dragLocalX, dragLocalY, 0
-        )
-        try {
-            w.forwardTouch(ev)
-        } finally {
-            ev.recycle()
+    private fun updateEdgeScroll() {
+        val request = edgeScrollRequest()
+        if (request == null) { stopEdgeScroll(); return }
+        val (w, v) = request
+        if (w !== edgeWindow) {
+            stopEdgeScroll()
+            edgeWindow = w
+            edgeVelocity = v
+            uiHandler.postDelayed(edgeDwellRunnable, EDGE_DWELL_MS)
+            return
         }
+        edgeVelocity = v
+        if (edgeArmed) w.setEdgeScrollVelocity(v)
+    }
+
+    private fun stopEdgeScroll() {
+        uiHandler.removeCallbacks(edgeDwellRunnable)
+        edgeWindow?.setEdgeScrollVelocity(0f)
+        edgeWindow = null
+        edgeVelocity = 0f
+        edgeArmed = false
     }
 
     /**
@@ -1513,6 +1505,7 @@ class MainActivity : AppCompatActivity() {
         cursorY = (cursorY + dy).coerceIn(0f, maxH - 1f)
         setCursorVisible(true)
         updateCursorView()
+        updateEdgeScroll()
     }
 
     /** Debug cursor placement: "window" or "x,y" in logical px. */
@@ -1535,6 +1528,7 @@ class MainActivity : AppCompatActivity() {
         setCursorVisible(true)
         updateCursorView()
         Log.i(TAG, "DEBUG cursor -> ($cursorX, $cursorY)")
+        updateEdgeScroll()
     }
 
     private fun updateCursorView() {
@@ -1731,6 +1725,7 @@ class MainActivity : AppCompatActivity() {
      * releases it, and entering MODIFY drops ACTIVE anyway.
      */
     private fun onRightArmTripleTap() {
+        stopEdgeScroll()
         val controller = hudPinBoardController
         val pt = cursorInteractionPoint()
         if (controller != null) {
@@ -1769,6 +1764,7 @@ class MainActivity : AppCompatActivity() {
      * the wrong place to land by accident.
      */
     private fun onRightArmDoubleTap(gapMs: Long) {
+        stopEdgeScroll()
         Log.i(TAG, "Right-arm double-tap (gap=${gapMs}ms)")
         val controller = hudPinBoardController
         val pt = cursorInteractionPoint()
@@ -1821,10 +1817,6 @@ class MainActivity : AppCompatActivity() {
         screenX: Float,
         screenY: Float
     ): Boolean {
-        // A drag already owns the pointer. Injecting a second DOWN/UP here
-        // would tear the scroll in half and click whatever moved under the
-        // frozen cursor.
-        if (draggingWindow != null) return false
         val origin = IntArray(2)
         window.getLocationOnScreen(origin)
         val localX = screenX - origin[0]
@@ -1843,6 +1835,18 @@ class MainActivity : AppCompatActivity() {
     /** Synthetic click at the cursor through the overlay hit-test chain. */
     /** [point] is latched at TAP time, not sampled when a timer fires. */
     private fun performClickAtCursor(point: Pair<Float, Float>? = null) {
+        // Every branch below can change whether the cursor's current spot
+        // means anything (activating a window, dismissing the keyboard), and
+        // the wearer may already be parked in a band — so re-decide after,
+        // rather than waiting for the next slide.
+        try {
+            performClickAtCursorInner(point)
+        } finally {
+            updateEdgeScroll()
+        }
+    }
+
+    private fun performClickAtCursorInner(point: Pair<Float, Float>? = null) {
         val pt = point ?: cursorInteractionPoint()
 
         // A browser window gets first refusal, because it is the only surface
@@ -2078,6 +2082,16 @@ class MainActivity : AppCompatActivity() {
         // A right-pad touch that moves less than this (raw px) is a tap,
         // not a cursor slide.
         private const val RIGHT_ARM_TAP_MOVE_TOLERANCE_PX = 45f
+
+        /**
+         * Band thickness in logical px. Deliberately thin: the windows are
+         * only 226-430 px tall, so a fat band would swallow the part of the
+         * page the wearer is trying to point at.
+         */
+        private const val EDGE_BAND_PX = 22f
+        private const val EDGE_MAX_PX_PER_S = 700f
+        private const val EDGE_SPEED_STEP = 25f
+        private const val EDGE_DWELL_MS = 180L
         // Collapse one physical tap delivered on both the key and touch
         // paths. Well below a real double-tap gap (>=150ms typical).
         private const val RIGHT_ARM_TAP_DEDUPE_MS = 90L

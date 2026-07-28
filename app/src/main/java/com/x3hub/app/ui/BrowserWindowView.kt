@@ -205,6 +205,35 @@ class BrowserWindowView @JvmOverloads constructor(
         )
     }
 
+    // ── Edge scrolling ───────────────────────────────────────────────
+    //
+    // The wearer parks the cursor near a window's top or bottom rim and the
+    // page scrolls until they move away, so one scroll can last many seconds.
+    // Driving that from the host would cost a JS bridge call every frame, so
+    // instead the host sets a VELOCITY and the document animates itself: one
+    // call when the speed changes, one to stop. Picking which box actually
+    // scrolls is a DOM sweep, so it happens once per scroll, not per frame.
+
+    private var edgeScrollVelocity = 0f
+
+    /** px/second; positive scrolls down. 0 stops. */
+    fun setEdgeScrollVelocity(pxPerSecond: Float) {
+        if (pxPerSecond == edgeScrollVelocity) return
+        edgeScrollVelocity = pxPerSecond
+        webView.evaluateJavascript(
+            "window.__x3EdgeScroll && window.__x3EdgeScroll($pxPerSecond);", null
+        )
+    }
+
+    /**
+     * A new document has none of our JS state, so the velocity we believe we
+     * sent is stale. Without this the first scroll after a navigation is
+     * deduped away and the page sits still.
+     */
+    private fun resetEdgeScrollState() {
+        edgeScrollVelocity = 0f
+    }
+
     /** Host callbacks for page text fields; set by the activity. */
     var onPageInputFocus: ((String) -> Unit)? = null
     var onPageInputBlur: (() -> Unit)? = null
@@ -233,6 +262,8 @@ class BrowserWindowView @JvmOverloads constructor(
 
     private fun injectInputHooks() {
         runCatching { webView.evaluateJavascript(PageInputBridge.JS, null) }
+        runCatching { webView.evaluateJavascript(EDGE_SCROLL_JS, null) }
+        resetEdgeScrollState()
     }
 
     /** Type into whatever field the page currently has focused. */
@@ -557,6 +588,10 @@ class BrowserWindowView @JvmOverloads constructor(
         isActive = false
         isModifying = false
         foreground = borderInert
+        // An edge scroll outlives the cursor that started it otherwise: the
+        // page animates itself, so nothing stops when the window loses the
+        // input and the wearer watches a window they no longer own scroll on.
+        setEdgeScrollVelocity(0f)
     }
 
     /**
@@ -570,7 +605,10 @@ class BrowserWindowView @JvmOverloads constructor(
     fun setModify(on: Boolean) {
         if (isModifying == on) return
         isModifying = on
-        if (on) isActive = false
+        if (on) {
+            isActive = false
+            setEdgeScrollVelocity(0f)
+        }
         foreground = if (on) borderModify else borderInert
     }
 
@@ -832,6 +870,83 @@ class BrowserWindowView @JvmOverloads constructor(
 
     companion object {
         private const val TAG = "X3HubBrowserWindow"
+
+        /**
+         * The page-side half of edge scrolling: a velocity the document
+         * applies on its own animation frames.
+         *
+         * Two things it must get right. Time-based rather than per-frame
+         * steps, so a busy page scrolls the same distance per second as an
+         * idle one instead of crawling — with the delta clamped, because a
+         * long stall (a GC pause, a heavy layout) would otherwise resume by
+         * teleporting the page. And a sub-pixel accumulator, because handing
+         * scrollBy a fraction every frame rounds to nothing on some engines
+         * and the slowest speeds simply never move.
+         *
+         * It also gives up once the box stops moving: the wearer leaves the
+         * cursor parked at the rim after hitting the end of the article, and
+         * there is no reason to keep an animation callback alive for that.
+         */
+        private val EDGE_SCROLL_JS = """
+            (function(){
+              if (window.__x3EdgeScroll) return;
+              var E = { v:0, raf:0, last:0, acc:0, target:null, still:0, lastPos:null };
+              function pick(){
+                try {
+                  var best = null, bestArea = 0, all = document.querySelectorAll('*');
+                  for (var i = 0; i < all.length && i < 4000; i++){
+                    var e = all[i];
+                    var s = getComputedStyle(e);
+                    if (!/auto|scroll/.test(s.overflowY)) continue;
+                    if (e.scrollHeight <= e.clientHeight + 4) continue;
+                    var r = e.getBoundingClientRect(), a = r.width * r.height;
+                    if (a > bestArea){ bestArea = a; best = e; }
+                  }
+                  // Only trust an inner pane when the document itself cannot
+                  // scroll — same rule the agent's scroll uses.
+                  var docH = document.documentElement.scrollHeight;
+                  if (best && bestArea > innerWidth * innerHeight * 0.4 &&
+                      docH <= innerHeight + 4) return best;
+                } catch (err) {}
+                return window;
+              }
+              function pos(){
+                return E.target === window
+                  ? (window.pageYOffset || document.documentElement.scrollTop || 0)
+                  : E.target.scrollTop;
+              }
+              function step(ts){
+                if (!E.v || !E.target){ E.raf = 0; return; }
+                if (!E.last) E.last = ts;
+                var dt = ts - E.last; E.last = ts;
+                if (dt > 64) dt = 64;
+                if (dt < 0) dt = 0;
+                E.acc += E.v * dt / 1000;
+                var whole = E.acc > 0 ? Math.floor(E.acc) : Math.ceil(E.acc);
+                if (whole){
+                  E.acc -= whole;
+                  if (E.target === window) window.scrollBy(0, whole);
+                  else E.target.scrollTop += whole;
+                }
+                var p = pos();
+                if (E.lastPos !== null && p === E.lastPos){
+                  if (++E.still > 40){ E.v = 0; E.raf = 0; return; }
+                } else { E.still = 0; }
+                E.lastPos = p;
+                E.raf = requestAnimationFrame(step);
+              }
+              window.__x3EdgeScroll = function(v){
+                E.v = v;
+                if (!v){
+                  if (E.raf) cancelAnimationFrame(E.raf);
+                  E.raf = 0; E.target = null; E.acc = 0; E.lastPos = null; E.still = 0;
+                  return;
+                }
+                if (!E.target){ E.target = pick(); E.lastPos = null; E.still = 0; }
+                if (!E.raf){ E.last = 0; E.raf = requestAnimationFrame(step); }
+              };
+            })();
+        """.trimIndent()
 
         /**
          * PORTRAIT 3:4 sizes in logical px, roughly 0.75× / 1× / 1.4× /
