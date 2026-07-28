@@ -203,6 +203,7 @@ class HudPinBoardController(
         val resumeModifyPinId = modifyPinId
         exitModifyMode()
         board.removeAllViews()
+        movePreview = null
         pinViews.clear()
         // Windows whose pin is gone die HERE, not lazily: each one is a live
         // WebView (renderer process, JS heap) plus a page-agent controller in
@@ -923,9 +924,64 @@ class HudPinBoardController(
         return true
     }
 
+    // ── Move preview ─────────────────────────────────────────────────
+
+    private var movePreview: View? = null
+
+    /**
+     * Show where the pin would land, as a dashed outline at the cursor.
+     *
+     * Moving a pin used to be blind: the wearer entered modify mode, tapped
+     * a spot, and only then saw whether they had put it where they meant —
+     * on a display where a pin is 66px wide and the cursor is a small arrow,
+     * that is a guess. The ghost is the same size as the pin and clamped the
+     * same way the commit is, so what it shows is exactly what will happen.
+     */
+    fun updateMovePreview(screenX: Float, screenY: Float) {
+        val id = modifyPinId
+        val container = if (id != null) pinViews[id] else null
+        if (container == null) { hideMovePreview(); return }
+
+        val w = container.layoutParams.width
+        val h = container.layoutParams.height
+        val boardLoc = IntArray(2)
+        board.getLocationOnScreen(boardLoc)
+        val lp = (movePreview?.layoutParams as? FrameLayout.LayoutParams)
+            ?: FrameLayout.LayoutParams(w, h)
+        lp.width = w
+        lp.height = h
+        lp.leftMargin = (screenX - boardLoc[0] - w / 2f).toInt()
+        lp.topMargin = (screenY - boardLoc[1] - h / 2f).toInt()
+        clampToZone(lp, w, h, lastZone ?: computeZone())
+
+        val view = movePreview ?: View(activity).also { v ->
+            v.background = GradientDrawable().apply {
+                setColor(Color.TRANSPARENT)
+                // Dashed, and amber to match the modify border — a solid
+                // outline would read as another pin rather than a target.
+                setStroke(dp(1), 0xFFFFB347.toInt(), 6f * density, 4f * density)
+                cornerRadius = 2f * density
+            }
+            v.elevation = 8f * density
+            v.isClickable = false
+            v.isFocusable = false
+            board.addView(v)
+            movePreview = v
+        }
+        view.layoutParams = lp
+        view.visibility = View.VISIBLE
+    }
+
+    private fun hideMovePreview() {
+        val v = movePreview ?: return
+        movePreview = null
+        runCatching { board.removeView(v) }
+    }
+
     fun isInModifyMode(): Boolean = modifyPinId != null
 
     fun exitModifyMode() {
+        hideMovePreview()
         val container = pinViews[modifyPinId] ?: run {
             modifyPinId = null
             return

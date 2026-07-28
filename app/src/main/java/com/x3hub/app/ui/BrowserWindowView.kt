@@ -275,6 +275,16 @@ class BrowserWindowView @JvmOverloads constructor(
             loadUrl(url)
             return
         }
+        // A still saved before uniform captures were rejected — YouTube and
+        // anything else on a video surface produced solid black. Showing it
+        // hands the wearer a black box where their window was.
+        if (isBlank(bmp)) {
+            Log.i(TAG, "snapshot is blank, loading live instead: $url")
+            bmp.recycle()
+            runCatching { java.io.File(path).delete() }
+            loadUrl(url)
+            return
+        }
         deferredUrl = url
         val iv = android.widget.ImageView(context)
         iv.scaleType = android.widget.ImageView.ScaleType.FIT_START
@@ -369,6 +379,17 @@ class BrowserWindowView @JvmOverloads constructor(
                 c.drawColor(THUMB_BACKDROP)
                 webView.draw(c)
             }
+            // A page whose pixels are all one colour carried no information.
+            // Video is the usual cause: YouTube composites its player on a
+            // hardware surface the software canvas cannot see, so the capture
+            // comes back solid black — and pinning that gives the wearer a
+            // black box where their window used to be. Better no still at all;
+            // the caller then loads the page instead.
+            if (isBlank(full)) {
+                Log.i(TAG, "capture discarded: uniform (likely video surface)")
+                full.recycle()
+                return@runCatching null
+            }
             if (w <= maxWidth) return@runCatching full
             val scaled = android.graphics.Bitmap.createScaledBitmap(
                 full, maxWidth, (h.toFloat() * maxWidth / w).toInt().coerceAtLeast(1), true
@@ -382,6 +403,39 @@ class BrowserWindowView @JvmOverloads constructor(
             // goes blank for as long as the layer is wrong.
             runCatching { webView.setLayerType(previousLayer, null) }
         }.getOrNull()
+    }
+
+    /**
+     * True when a capture holds essentially one colour.
+     *
+     * Sampled on a coarse grid rather than per-pixel: this runs on the main
+     * thread while the app is being closed, and a full scan of a 170x226
+     * bitmap to answer a yes/no question is work the wearer would feel.
+     */
+    private fun isBlank(bmp: android.graphics.Bitmap): Boolean {
+        val stepX = (bmp.width / 12).coerceAtLeast(1)
+        val stepY = (bmp.height / 12).coerceAtLeast(1)
+        var first: Int? = null
+        var x = 0
+        while (x < bmp.width) {
+            var y = 0
+            while (y < bmp.height) {
+                val c = bmp.getPixel(x, y)
+                if (first == null) first = c
+                else if (differs(first, c)) return false
+                y += stepY
+            }
+            x += stepX
+        }
+        return true
+    }
+
+    /** Tolerant of JPEG-ish noise; anything a wearer could SEE differs. */
+    private fun differs(a: Int, b: Int): Boolean {
+        val dr = kotlin.math.abs(((a shr 16) and 0xFF) - ((b shr 16) and 0xFF))
+        val dg = kotlin.math.abs(((a shr 8) and 0xFF) - ((b shr 8) and 0xFF))
+        val db = kotlin.math.abs((a and 0xFF) - (b and 0xFF))
+        return dr > 12 || dg > 12 || db > 12
     }
 
     /** Host callbacks for page text fields; set by the activity. */

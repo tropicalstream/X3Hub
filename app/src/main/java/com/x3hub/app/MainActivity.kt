@@ -1859,6 +1859,13 @@ class MainActivity : AppCompatActivity() {
         setCursorVisible(true)
         updateCursorView()
         updateEdgeScroll()
+        // While a pin is being moved, the cursor IS the destination.
+        hudPinBoardController?.let { c ->
+            if (c.isInModifyMode()) {
+                val pt = cursorInteractionPoint()
+                c.updateMovePreview(pt.first, pt.second)
+            }
+        }
     }
 
     /** Debug cursor placement: "window" or "x,y" in logical px. */
