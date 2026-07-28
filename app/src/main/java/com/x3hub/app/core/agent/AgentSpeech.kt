@@ -70,7 +70,14 @@ object AgentSpeech {
 
     fun stop() {
         generation++
-        runCatching { track?.pause(); track?.flush(); track?.release() }
+        // Silence it now, but do NOT release. The thread that built this
+        // track is sitting in the drain loop reading playbackHeadPosition,
+        // and freeing the native object under it throws
+        // IllegalStateException mid-answer. Pause+flush stops the sound
+        // immediately; the owning thread sees the generation change and
+        // tears down its own track.
+        runCatching { track?.pause() }
+        runCatching { track?.flush() }
         track = null
         runCatching { deviceTts?.stop() }
     }
@@ -117,6 +124,9 @@ object AgentSpeech {
     @Volatile private var deviceTtsReady = false
 
     private fun speakOnDevice(context: Context, text: String, gen: Int) {
+        // Superseded by a newer answer — staying quiet IS the correct
+        // outcome, and warming up an engine to say it anyway is noise.
+        if (gen != generation) return
         val app = context.applicationContext
         val existing = deviceTts
         if (existing != null && deviceTtsReady) {
@@ -280,20 +290,26 @@ object AgentSpeech {
         val totalFrames = pcmLen / BYTES_PER_FRAME
         val audioMs = totalFrames * 1000L / SAMPLE_RATE
         val deadline = System.currentTimeMillis() + audioMs + DRAIN_GRACE_MS
-        while (myGen == generation &&
-            t.playbackHeadPosition < totalFrames &&
-            System.currentTimeMillis() < deadline
-        ) {
+        var played = 0
+        while (myGen == generation && System.currentTimeMillis() < deadline) {
+            // Read defensively: an interrupting utterance can retire this
+            // track between the generation check above and this call.
+            val pos = runCatching { t.playbackHeadPosition }.getOrNull() ?: break
+            played = pos
+            if (pos >= totalFrames) break
             Thread.sleep(40)
         }
-        val played = t.playbackHeadPosition
         if (myGen == generation) runCatching { t.stop() }
         runCatching { t.release() }
         if (track === t) track = null
         Log.i(
             TAG,
             "spoke ${played * 1000L / SAMPLE_RATE}ms of ${audioMs}ms" +
-                if (played < totalFrames) " (CUT SHORT)" else ""
+                when {
+                    myGen != generation -> " (interrupted)"
+                    played < totalFrames -> " (CUT SHORT)"
+                    else -> ""
+                }
         )
     }
 
