@@ -122,6 +122,9 @@ class MainActivity : AppCompatActivity() {
     private var pendingSingleTapClick: Runnable? = null
     /** How many taps deep the current chain is: 1 single, 2 double, 3 triple. */
     private var rightArmTapStreak = 0
+
+    /** Where the first tap of the current streak landed — see onRightArmTapUp. */
+    private var rightArmStreakPoint: Pair<Float, Float>? = null
     private var hubSettingsOverlay: HubSettingsOverlay? = null
 
     /**
@@ -939,12 +942,24 @@ class MainActivity : AppCompatActivity() {
                 // not bypassed by it.
                 intent?.getStringExtra("taps")?.let { spec ->
                     val n = spec.trim().toIntOrNull()?.coerceIn(1, 3) ?: 1
-                    Log.i(TAG, "DEBUG synth $n tap(s) at ${cursorInteractionPoint()}")
+                    // `-e drift <px>` walks the cursor between taps, which is
+                    // what a real temple pad does: the finger that presses
+                    // also slides. A scripted burst at one fixed coordinate
+                    // cannot reproduce the class of bug that causes — a
+                    // triple-tap judged at the drifted position instead of
+                    // where the wearer aimed.
+                    val drift = intent.getStringExtra("drift")?.trim()?.toFloatOrNull() ?: 0f
+                    Log.i(TAG, "DEBUG synth $n tap(s) at ${cursorInteractionPoint()} drift=$drift")
                     repeat(n) { i ->
-                        uiHandler.postDelayed(
-                            { onRightArmTapUp(TapSource.KEY) },
-                            i * SYNTH_TAP_GAP_MS
-                        )
+                        uiHandler.postDelayed({
+                            if (i > 0 && drift != 0f) {
+                                cursorX -= drift
+                                cursorY -= drift
+                                updateCursorView()
+                                Log.i(TAG, "DEBUG drift -> ($cursorX, $cursorY)")
+                            }
+                            onRightArmTapUp(TapSource.KEY)
+                        }, i * SYNTH_TAP_GAP_MS)
                     }
                     return
                 }
@@ -2177,6 +2192,20 @@ class MainActivity : AppCompatActivity() {
         rightArmTapStreak = if (chained) rightArmTapStreak + 1 else 1
         rightArmKeyLastTapUpMs = now
 
+        // WHERE the wearer aimed is fixed by the FIRST tap of the streak.
+        //
+        // Tapping the temple pad nudges the cursor — the finger that presses
+        // also slides a little — so by the third tap it has walked some way
+        // from where it started. Every later tap re-sampling the cursor meant
+        // a triple-tap was judged at the drifted position, and on a 170px
+        // window near the edge of the board that lands outside it: the board
+        // reported no pin under the point and the gesture fell through to
+        // "triple-tap on the hub", opening Settings instead of window
+        // control. The wearer aimed once and held still; the cursor did the
+        // moving.
+        if (!chained) rightArmStreakPoint = cursorInteractionPoint()
+        val point = rightArmStreakPoint ?: cursorInteractionPoint()
+
         pendingSingleTapClick?.let { uiHandler.removeCallbacks(it) }
         pendingSingleTapClick = null
 
@@ -2185,15 +2214,9 @@ class MainActivity : AppCompatActivity() {
             // there is no fourth meaning to wait for.
             rightArmTapStreak = 0
             rightArmKeyLastTapUpMs = 0L
-            onRightArmTripleTap()
+            onRightArmTripleTap(point)
             return
         }
-
-        // Latch WHERE the tap happened. performClickAtCursor used to sample
-        // the cursor when the timer fired, so drifting the cursor during the
-        // wait sent the click somewhere the wearer never aimed — off the gear
-        // and onto empty space, which starts a live microphone session.
-        val point = cursorInteractionPoint()
 
         if (rightArmTapStreak == 1 && !tapNeedsDeferral(point)) {
             performClickAtCursor(point)
@@ -2215,7 +2238,8 @@ class MainActivity : AppCompatActivity() {
             pendingSingleTapClick = null
             rightArmTapStreak = 0
             rightArmKeyLastTapUpMs = 0L
-            if (streakAtSchedule >= 2) onRightArmDoubleTap(gap) else performClickAtCursor(point)
+            if (streakAtSchedule >= 2) onRightArmDoubleTap(gap, point)
+            else performClickAtCursor(point)
         }
         pendingSingleTapClick = resolve
         uiHandler.postDelayed(resolve, window + 20L)
@@ -2288,10 +2312,10 @@ class MainActivity : AppCompatActivity() {
         setCursorVisible(true)
     }
 
-    private fun onRightArmTripleTap() {
+    private fun onRightArmTripleTap(point: Pair<Float, Float>? = null) {
         stopEdgeScroll()
         val controller = hudPinBoardController
-        val pt = cursorInteractionPoint()
+        val pt = point ?: cursorInteractionPoint()
         if (controller != null) {
             if (controller.isInModifyMode()) {
                 leaveModifyMode("triple-tap")
@@ -2323,11 +2347,11 @@ class MainActivity : AppCompatActivity() {
      * conversation in progress. The most side-effectful thing in the app is
      * the wrong place to land by accident.
      */
-    private fun onRightArmDoubleTap(gapMs: Long) {
+    private fun onRightArmDoubleTap(gapMs: Long, point: Pair<Float, Float>? = null) {
         stopEdgeScroll()
         Log.i(TAG, "Right-arm double-tap (gap=${gapMs}ms)")
         val controller = hudPinBoardController
-        val pt = cursorInteractionPoint()
+        val pt = point ?: cursorInteractionPoint()
 
         if (hubSettingsOverlay?.isShowing == true) {
             // A panel is up; a second tap on a button is just a second press.
