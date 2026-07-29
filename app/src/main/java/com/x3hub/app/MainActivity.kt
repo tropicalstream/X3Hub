@@ -905,6 +905,25 @@ class MainActivity : AppCompatActivity() {
                     hudPinBoardController?.debugDumpLayout()
                     return
                 }
+                // `-e taps N` — N right-arm taps at the CURRENT cursor, spaced
+                // the way a hand spaces them. `adb shell input tap` cannot do
+                // this: each one is a fresh JVM launch, ~200ms of latency the
+                // classifier reads as separate taps, so a double or triple
+                // gesture can never be reproduced from a script. The taps go
+                // in at onRightArmTapUp — the same door the real pad uses —
+                // so deferral, streak counting and dedupe are all under test,
+                // not bypassed by it.
+                intent?.getStringExtra("taps")?.let { spec ->
+                    val n = spec.trim().toIntOrNull()?.coerceIn(1, 3) ?: 1
+                    Log.i(TAG, "DEBUG synth $n tap(s) at ${cursorInteractionPoint()}")
+                    repeat(n) { i ->
+                        uiHandler.postDelayed(
+                            { onRightArmTapUp(TapSource.KEY) },
+                            i * SYNTH_TAP_GAP_MS
+                        )
+                    }
+                    return
+                }
                 intent?.getStringExtra("readpage")?.let {
                     // The exact path the assistant uses for "what is on my
                     // HUD" — the one that returned nothing on a restored
@@ -2119,24 +2138,33 @@ class MainActivity : AppCompatActivity() {
      */
     private fun tapNeedsDeferral(point: Pair<Float, Float>): Boolean {
         if (hubSettingsOverlay?.isShowing == true) return false
+        // MODIFY mode is the one place where ALL THREE counts mean something
+        // different — one commits the move, two or three leave — so a tap
+        // there has to wait long enough to learn which it is. Firing the
+        // single at once meant a double-tap's FIRST tap committed the move
+        // and dropped out of MODIFY, leaving its second to land on a hub that
+        // was no longer modifying: empty space, which starts a voice session.
+        // That is exactly the "single tap activates Gemini" the wearer saw.
+        if (hudPinBoardController?.isInModifyMode() == true) return true
         val window = hudPinBoardController?.browserWindowAt(point.first, point.second)
-        if (window != null) {
-            return window.isActive && hudPinBoardController?.isInModifyMode() != true
-        }
+        if (window != null) return window.isActive
         // Any other pin carries two meanings too: one tap OPENS it (a picture
         // goes fullscreen, a bookmark loads its page) and three enter MODIFY
         // to move or delete it. Firing the single immediately meant a
         // triple-tap to move a picture opened the viewer first and the move
-        // never happened. Not while already modifying — there the next tap is
-        // the move itself and must land at once.
-        if (hudPinBoardController?.isInModifyMode() == true) return false
-        return hudPinBoardController?.pinAt(point.first, point.second) != null
+        // never happened.
+        if (hudPinBoardController?.pinAt(point.first, point.second) != null) return true
         // Empty space means BOTH "start Gemini" (one tap) and "open settings"
         // (three). Firing the first immediately meant every triple-tap for
         // settings also opened a voice session behind it — connecting, greeting
         // and grabbing the mic, none of which the wearer asked for. The 340ms
         // is worth paying here and nowhere else: starting a session is stateful
         // and slow anyway, so the delay disappears into the connect.
+        //
+        // This return was unreachable for a while — the pin check above was
+        // added as its own `return`, so empty space never deferred and the
+        // settings triple-tap woke Gemini again. Every branch is a guarded
+        // `if` now so the fall-through is the only exit.
         return findOverlayHit(point.first, point.second) == null
     }
 
@@ -2152,17 +2180,30 @@ class MainActivity : AppCompatActivity() {
      * Leaving a window no longer needs its own gesture: a click outside it
      * releases it, and entering MODIFY drops ACTIVE anyway.
      */
+    /**
+     * Drop out of MODIFY without moving or deleting anything.
+     *
+     * Three things have to come down together or the display lies about what
+     * state it is in: the board's mode, the modify border on every window,
+     * and the local handle the left-arm resize swipe reads. Leaving any one
+     * of them set meant a swipe kept resizing a window that showed no border.
+     */
+    private fun leaveModifyMode(reason: String) {
+        val controller = hudPinBoardController ?: return
+        Log.i(TAG, "Leaving window control ($reason)")
+        controller.exitModifyMode()
+        controller.browserWindows().forEach { it.setModify(false) }
+        modifyingWindow = null
+        setCursorVisible(true)
+    }
+
     private fun onRightArmTripleTap() {
         stopEdgeScroll()
         val controller = hudPinBoardController
         val pt = cursorInteractionPoint()
         if (controller != null) {
             if (controller.isInModifyMode()) {
-                Log.i(TAG, "Triple-tap while modifying — leaving window control")
-                controller.exitModifyMode()
-                controller.browserWindows().forEach { it.setModify(false) }
-                modifyingWindow = null
-                setCursorVisible(true)
+                leaveModifyMode("triple-tap")
                 return
             }
             val window = controller.browserWindowAt(pt.first, pt.second)
@@ -2205,10 +2246,13 @@ class MainActivity : AppCompatActivity() {
 
         if (controller != null) {
             if (controller.isInModifyMode()) {
-                // Window control is triple-tap now, so a double while in it is
-                // a mis-tap, not an exit. Consume it: exiting on a stray pair
-                // would be a surprise, and the delete chip is live.
-                Log.i(TAG, "Double-tap while modifying — ignored")
+                // MODIFY is a mode, and a mode needs a cheap way out. Two taps
+                // leave it — NOT the page agent, which is what two taps mean
+                // everywhere else. A wearer who has entered MODIFY and thought
+                // better of it should not have to place the pin somewhere just
+                // to escape, and should certainly not get a live microphone
+                // for a page they were only trying to move.
+                leaveModifyMode("double-tap")
                 return
             }
             // The cursor does not have to still be ON the window. A wearer who
@@ -2319,7 +2363,7 @@ class MainActivity : AppCompatActivity() {
         // could never be closed. The board's claim has to be tested first.
         hudPinBoardController?.let { c ->
             if (c.isInModifyMode()) {
-                val consumed = c.onOverlayTapWhileModify(pt.first, pt.second)
+                c.onOverlayTapWhileModify(pt.first, pt.second)
                 // Whatever happened — delete, move, or a stale-view bailout —
                 // the board has left modify mode; the window flags must not
                 // outlive it, or the next swipe resizes a window that no
@@ -2328,7 +2372,13 @@ class MainActivity : AppCompatActivity() {
                     c.browserWindows().forEach { it.setModify(false) }
                     modifyingWindow = null
                 }
-                if (consumed) return
+                // Return whether or not the board claimed it. A tap made in
+                // MODIFY belongs to MODIFY, full stop. The bailout path
+                // (the pin's view went stale) reports "not consumed", and
+                // letting that fall through put the tap on empty space —
+                // which starts a voice session. Nobody who taps to place a
+                // pin is asking for a microphone.
+                return
             }
         }
 
@@ -2511,6 +2561,8 @@ class MainActivity : AppCompatActivity() {
         // margin for a casual rhythm.
         private const val DOUBLE_TAP_WINDOW_MS = 240L
         private const val TRIPLE_TAP_WINDOW_MS = 400L
+        // Inside BOTH windows, so `-e taps 3` really chains to a triple.
+        private const val SYNTH_TAP_GAP_MS = 120L
 
         private const val LEFT_ARM_TAP_MOVE_TOLERANCE_PX = 60f
         // A right-pad touch that moves less than this (raw px) is a tap,
