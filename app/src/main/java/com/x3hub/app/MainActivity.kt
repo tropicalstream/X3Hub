@@ -255,6 +255,30 @@ class MainActivity : AppCompatActivity() {
                 showNotice("Agent: ${outcome.task.take(46)}")
                 agentFor(window).run(outcome.task)
             }
+            is PageCommands.Outcome.NavigateThenScript -> {
+                showNotice(outcome.notice)
+                window.runAfterNextPageFinish {
+                    // Chained rather than nested in the script: the page the
+                    // script sends us to is a fresh document, so the follow-up
+                    // has to be armed here, on this side of the navigation.
+                    outcome.thenJs?.let { after ->
+                        window.runAfterNextPageFinish { window.evaluateJavascript(after) }
+                    }
+                    window.evaluateJavascript(outcome.js)
+                }
+                window.loadUrl(outcome.url)
+            }
+            is PageCommands.Outcome.SearchThenAgent -> {
+                // Search first, act second. The agent cannot leave the page it
+                // is on, so it has to be started on the results rather than
+                // handed a destination it has no way to reach.
+                showNotice(outcome.notice)
+                window.runAfterNextPageFinish {
+                    showNotice("Agent: ${outcome.task.take(46)}")
+                    agentFor(window).run(outcome.task)
+                }
+                window.loadUrl(outcome.url)
+            }
         }
     }
 
@@ -868,6 +892,18 @@ class MainActivity : AppCompatActivity() {
                 if (intent?.getStringExtra("adblock") != null) {
                     Log.i(TAG, "AdBlock ready=${AdBlock.ready()} domains=${AdBlock.size()} " +
                         "blockedThisPage=${AdBlock.blockCount()} err=${AdBlock.loadError}")
+                    return
+                }
+                intent?.getStringExtra("pcmaudio")?.let { fileName ->
+                    Log.i(TAG, "DEBUG pcmaudio: ${fileName.take(80)}")
+                    if (HudStateBridge.current().phase ==
+                        HudStateBridge.VoicePhase.IDLE
+                    ) {
+                        toggleGeminiSession()
+                    }
+                    runCatching {
+                        voiceServiceApi?.sendDebugPcm16File(fileName)
+                    }
                     return
                 }
                 intent?.getStringExtra("say")?.let { text ->

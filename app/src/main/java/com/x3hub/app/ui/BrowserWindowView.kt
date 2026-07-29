@@ -548,6 +548,19 @@ class BrowserWindowView @JvmOverloads constructor(
     /** Document ready — the moment to re-inject and resume. */
     var onPageFinishedListener: ((String?) -> Unit)? = null
 
+    private val pageFinishedOnce = mutableListOf<(String?) -> Unit>()
+
+    /**
+     * Run [block] once, after the next page finishes loading.
+     *
+     * For "navigate somewhere, then act on what arrives" — the agent has to
+     * be started on the results page, not on the page the wearer was
+     * standing on when they spoke.
+     */
+    fun runAfterNextPageFinish(block: (String?) -> Unit) {
+        pageFinishedOnce.add(block)
+    }
+
     /**
      * The page's readable text, for the page agent. innerText rather than
      * textContent on purpose: it respects display:none and collapses the
@@ -794,6 +807,17 @@ class BrowserWindowView @JvmOverloads constructor(
                 }
                 runCatching { CookieManager.getInstance().flush() }
                 onPageFinishedListener?.invoke(url)
+                // Drained AFTER the listener, and kept separate from it on
+                // purpose: onPageFinishedListener is a single slot that the
+                // page agent claims for every window, and wakeFromSnapshot
+                // swaps it out and back. Anything assigning it to wait for one
+                // navigation would silently kill the agent's own resume
+                // machinery, so one-shot waiters get their own queue.
+                if (pageFinishedOnce.isNotEmpty()) {
+                    val due = pageFinishedOnce.toList()
+                    pageFinishedOnce.clear()
+                    due.forEach { runCatching { it(url) } }
+                }
             }
         }
     }

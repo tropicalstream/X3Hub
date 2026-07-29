@@ -12,6 +12,7 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.x3hub.app.BuildConfig
 import com.x3hub.app.X3HubApp
 import com.x3hub.app.core.audio.GeminiAudioPlayer
 import com.x3hub.app.core.bridge.HudStateBridge
@@ -26,6 +27,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -84,6 +86,15 @@ class GeminiVoicePipeline(context: Context) {
     /** Last moment either side was "active" — see the watchdog. */
     @Volatile private var lastConversationActivityMs: Long = 0L
     private val toolCallsInFlight = AtomicInteger(0)
+    private val toolTurnCoordinator = ToolTurnCoordinator()
+    private val bufferedToolAudioLock = Any()
+    private val bufferedToolAudio = ArrayList<BufferedModelAudio>()
+
+    private data class BufferedModelAudio(val mimeType: String, val data: ByteArray)
+
+    /** True while a debug PCM fixture replaces live microphone frames. */
+    @Volatile
+    private var debugPcmInjectionActive: Boolean = false
 
     /**
      * Late-output gate. Its only job is to drop duplicate
@@ -139,6 +150,8 @@ class GeminiVoicePipeline(context: Context) {
             return
         }
         heardUserYet = false
+        toolTurnCoordinator.resetSession()
+        clearBufferedToolAudio()
         bargeInEnabled = HubPrefs.bargeInEnabled(appContext)
         Log.i(TAG, "activate(): barge-in ${if (bargeInEnabled) "on" else "off (wait for reply)"}")
 
@@ -242,11 +255,14 @@ class GeminiVoicePipeline(context: Context) {
         liveSession = null
         liveSessionReady = false
         localBargeAtMs = 0L
+        debugPcmInjectionActive = false
         runCatching { session?.close() }
 
         connectJob?.cancel()
         connectJob = null
         dropLateOutputUntilMs = 0L
+        toolTurnCoordinator.resetSession()
+        clearBufferedToolAudio()
 
         // Releasing the AudioTrack beats pause/flush in the service path:
         // stale Live callbacks can't keep speaking on a detached track.
@@ -378,6 +394,67 @@ class GeminiVoicePipeline(context: Context) {
         Log.i(TAG, "sendDebugText ok=$ok frame=${frame != null}: ${text.take(80)}")
     }
 
+    /**
+     * Deterministic voice fixture for debug builds.
+     *
+     * The file is raw little-endian PCM16, mono, 16 kHz, stored directly in
+     * filesDir. Frames are paced at 20 ms and replace (rather than interleave
+     * with) microphone frames. Waiting for setupComplete here removes the
+     * fixed-delay race that makes typed debug turns corrupt a slow Live
+     * handshake.
+     */
+    fun sendDebugPcm16File(fileName: String) {
+        if (!BuildConfig.DEBUG) return
+        val safeName = File(fileName).name
+        if (safeName != fileName || safeName.isBlank()) {
+            Log.w(TAG, "debug PCM rejected unsafe name='$fileName'")
+            return
+        }
+        val file = File(appContext.filesDir, safeName)
+        scope.launch {
+            var waits = 0
+            while (!liveSessionReady && waits++ < 100) delay(100L)
+            if (!liveSessionReady) {
+                Log.w(TAG, "debug PCM timed out waiting for setupComplete")
+                return@launch
+            }
+            val epoch = activeSessionEpoch
+            val pcm = runCatching { file.readBytes() }.getOrElse {
+                Log.w(TAG, "debug PCM read failed: ${it.message}")
+                return@launch
+            }
+            if (pcm.isEmpty()) {
+                Log.w(TAG, "debug PCM is empty: $safeName")
+                return@launch
+            }
+            heardUserYet = true
+            noteConversationActivity()
+            debugPcmInjectionActive = true
+            var offset = 0
+            var sentFrames = 0
+            try {
+                while (offset < pcm.size &&
+                    liveSessionReady &&
+                    isSessionEpochCurrent(epoch)
+                ) {
+                    val end = minOf(offset + DEBUG_PCM_FRAME_BYTES, pcm.size)
+                    val frame = pcm.copyOfRange(offset, end)
+                    if (liveSession?.sendAudioChunkPcm16(frame, frame.size, SAMPLE_RATE_HZ) != true) {
+                        Log.w(TAG, "debug PCM send failed at byte $offset")
+                        break
+                    }
+                    sentFrames++
+                    offset = end
+                    noteConversationActivity()
+                    delay(DEBUG_PCM_FRAME_MS)
+                }
+            } finally {
+                debugPcmInjectionActive = false
+            }
+            Log.i(TAG, "debug PCM sent bytes=$offset frames=$sentFrames file=$safeName")
+        }
+    }
+
     private fun noteConversationActivity() {
         lastConversationActivityMs = SystemClock.uptimeMillis()
     }
@@ -431,6 +508,10 @@ class GeminiVoicePipeline(context: Context) {
                     Log.d(TAG, "Dropping late outputTranscription (post-turn window): '${text.take(120)}'")
                     return
                 }
+                if (!toolTurnCoordinator.shouldDeliverTranscript(text)) {
+                    Log.d(TAG, "Buffering possible repeated post-tool transcript: '${text.take(120)}'")
+                    return
+                }
                 Log.d(TAG, "onOutputTranscription: '${text.take(120)}'")
                 runCatching { chat.appendLiveAssistantStreamChunk(text) }
                 HudStateBridge.update {
@@ -454,22 +535,14 @@ class GeminiVoicePipeline(context: Context) {
                 if (localBargeAtMs != 0L &&
                     SystemClock.uptimeMillis() - localBargeAtMs < LOCAL_BARGE_HOLD_MS
                 ) return
-                noteConversationActivity()
-                Log.d(TAG, "onModelAudio: ${data.size} bytes ($mimeType)")
-                runCatching {
-                    audioPlayer.playChunk(mimeType, data, muted = false, volume = 1f)
-                }
-                // Drive the MODEL (green) glow from Gemini's outgoing audio.
-                runCatching {
-                    val peak = calculatePcm16Peak(data, data.size)
-                    val norm = (peak / 32_767f).coerceIn(0f, 1f)
-                    HudStateBridge.update {
-                        it.copy(
-                            oscilloscopeLevel = norm,
-                            oscilloscopeChannel = HudStateBridge.OscilloscopeChannel.MODEL
-                        )
+                if (!toolTurnCoordinator.shouldDeliverAudio(data.size)) {
+                    synchronized(bufferedToolAudioLock) {
+                        bufferedToolAudio.add(BufferedModelAudio(mimeType, data.copyOf()))
                     }
+                    Log.d(TAG, "Buffering possible repeated post-tool audio: ${data.size} bytes")
+                    return
                 }
+                deliverModelAudio(mimeType, data)
             }
 
             override fun onInterrupted() {
@@ -481,6 +554,8 @@ class GeminiVoicePipeline(context: Context) {
                 // first). Either way the hold has done its job — clear it so
                 // the NEXT turn's audio isn't swallowed.
                 localBargeAtMs = 0L
+                toolTurnCoordinator.onInterrupted()
+                clearBufferedToolAudio()
                 noteConversationActivity()
                 runCatching { audioPlayer.stopAndFlush() }
                 HudStateBridge.update {
@@ -494,13 +569,43 @@ class GeminiVoicePipeline(context: Context) {
             override fun onToolCall(callId: String, name: String, args: String) {
                 if (!isSessionEpochCurrent(epoch)) return
                 noteConversationActivity()
-                Log.i(TAG, "onToolCall: callId=$callId name=$name args=${args.take(160)}")
+                val decision = toolTurnCoordinator.onToolCall(callId)
+                if (!decision.shouldDispatch) {
+                    Log.w(TAG, "Ignoring repeated tool call ID: callId=$callId name=$name")
+                    return
+                }
+                Log.i(
+                    TAG,
+                    "onToolCall: callId=$callId name=$name " +
+                        "preOutput=${decision.hadSubstantialPreToolOutput} args=${args.take(160)}"
+                )
                 dispatchNativeTool(callId, name, args, epoch)
             }
 
             override fun onTurnComplete(finishReason: String?) {
                 if (!isSessionEpochCurrent(epoch)) return
                 noteConversationActivity()
+                val completion = toolTurnCoordinator.onTurnComplete()
+                val bufferedAudio = drainBufferedToolAudio()
+                if (completion.deliverBufferedRemainder) {
+                    Log.i(
+                        TAG,
+                        "Delivering distinct post-tool remainder: " +
+                            "text=${completion.bufferedTranscript.length} audioChunks=${bufferedAudio.size}"
+                    )
+                    if (completion.bufferedTranscript.isNotBlank()) {
+                        runCatching {
+                            chat.appendLiveAssistantStreamChunk(completion.bufferedTranscript)
+                        }
+                    }
+                    bufferedAudio.forEach { deliverModelAudio(it.mimeType, it.data) }
+                } else if (completion.suppressAsDuplicate) {
+                    Log.i(
+                        TAG,
+                        "Suppressed repeated post-tool remainder: " +
+                            "text=${completion.bufferedTranscript.length} audioChunks=${bufferedAudio.size}"
+                    )
+                }
                 Log.d(TAG, "onTurnComplete: finishReason=$finishReason")
                 // A finished turn ends any local mute: the next turn is a
                 // fresh reply and must be allowed to play.
@@ -541,6 +646,7 @@ class GeminiVoicePipeline(context: Context) {
 
         if (!toolDispatcher.isSupported(toolName)) {
             Log.w(TAG, "unsupported tool: $toolName")
+            toolTurnCoordinator.onToolResult(callId, succeeded = false)
             runCatching {
                 liveSession?.sendToolResponse(callId, toolName, "Unknown tool: $toolName")
             }
@@ -553,6 +659,7 @@ class GeminiVoicePipeline(context: Context) {
             HudStateBridge.update { it.copy(notification = "Running $toolName…") }
             try {
                 val result = toolDispatcher.dispatch(toolName, args)
+                val resultSucceeded = result.isSuccess
                 val resultText = result.getOrElse { err ->
                     Log.w(TAG, "tool failed name=$toolName: ${err.message}")
                     err.message?.trim().takeUnless { it.isNullOrBlank() }
@@ -560,6 +667,9 @@ class GeminiVoicePipeline(context: Context) {
                 }
                 Log.i(TAG, "tool result name=$toolName text='${resultText.take(180)}'")
                 if (!isSessionEpochCurrent(epoch)) return@launch
+                // Arm buffering before the response is sent; the next model
+                // audio can arrive immediately after sendToolResponse.
+                toolTurnCoordinator.onToolResult(callId, resultSucceeded)
                 val ok = runCatching {
                     liveSession?.sendToolResponse(callId, toolName, resultText) == true
                 }.getOrDefault(false)
@@ -569,6 +679,40 @@ class GeminiVoicePipeline(context: Context) {
                 toolCallsInFlight.decrementAndGet()
                 noteConversationActivity()
             }
+        }
+    }
+
+    private fun deliverModelAudio(mimeType: String, data: ByteArray) {
+        noteConversationActivity()
+        Log.d(TAG, "onModelAudio: ${data.size} bytes ($mimeType)")
+        runCatching {
+            audioPlayer.playChunk(mimeType, data, muted = false, volume = 1f)
+        }
+        // Drive the MODEL (green) glow from Gemini's outgoing audio.
+        runCatching {
+            val peak = calculatePcm16Peak(data, data.size)
+            val norm = (peak / 32_767f).coerceIn(0f, 1f)
+            HudStateBridge.update {
+                it.copy(
+                    oscilloscopeLevel = norm,
+                    oscilloscopeChannel = HudStateBridge.OscilloscopeChannel.MODEL
+                )
+            }
+        }
+    }
+
+    private fun drainBufferedToolAudio(): List<BufferedModelAudio> =
+        synchronized(bufferedToolAudioLock) {
+            if (bufferedToolAudio.isEmpty()) {
+                emptyList()
+            } else {
+                bufferedToolAudio.toList().also { bufferedToolAudio.clear() }
+            }
+        }
+
+    private fun clearBufferedToolAudio() {
+        synchronized(bufferedToolAudioLock) {
+            bufferedToolAudio.clear()
         }
     }
 
@@ -739,7 +883,7 @@ class GeminiVoicePipeline(context: Context) {
                             )
                         }
                     }
-                    if (isSessionEpochCurrent(epoch)) {
+                    if (isSessionEpochCurrent(epoch) && !debugPcmInjectionActive) {
                         runCatching {
                             // Silence rather than a gap: the stream must stay
                             // continuous or the server's VAD reads the hole as
@@ -854,6 +998,10 @@ class GeminiVoicePipeline(context: Context) {
     companion object {
         private const val TAG = "GeminiVoicePipe"
         private const val SAMPLE_RATE_HZ = 16_000
+
+        /** 20 ms of mono 16-bit audio at 16 kHz. */
+        private const val DEBUG_PCM_FRAME_BYTES = 640
+        private const val DEBUG_PCM_FRAME_MS = 20L
 
         /** Mars's spec: mutual silence that ends the conversation. */
         private const val SILENCE_END_MS = 5_000L

@@ -32,6 +32,40 @@ object PageCommands {
         data class ForAgent(val task: String) : Outcome()
         /** Drive the page's OWN search box; falls back to the web if it has none. */
         data class SearchInPage(val query: String) : Outcome()
+        /**
+         * Go to [url] first, THEN hand [task] to the agent on whatever loads.
+         *
+         * The page agent lives inside one document: it can click, type and
+         * scroll, but it cannot navigate to another site. So "search for John
+         * Digweed and play the music", handed over whole while standing on a
+         * Bit Shifter page, is a task it cannot even begin — and it said so,
+         * suggesting the wearer use the search function it could not reach.
+         * Doing the search HERE turns an impossible request into an ordinary
+         * one: the agent wakes up already looking at the results.
+         */
+        data class SearchThenAgent(
+            val url: String,
+            val task: String,
+            val notice: String
+        ) : Outcome()
+
+        /**
+         * Load [url], run [js] when it lands, and if that script navigates
+         * again, run [thenJs] when THAT lands.
+         *
+         * Two hops because of an origin wall. Bandcamp's fan API answers only
+         * on bandcamp.com, and the wearer is usually standing on an artist
+         * subdomain when they ask for their own music — measured from
+         * pixelh8.bandcamp.com, the call dies with "Failed to fetch". So the
+         * window has to be on bandcamp.com before anything can ask who is
+         * logged in.
+         */
+        data class NavigateThenScript(
+            val url: String,
+            val notice: String,
+            val js: String,
+            val thenJs: String? = null
+        ) : Outcome()
         /** Abort whatever the agent is doing, now. */
         object StopAgent : Outcome()
     }
@@ -116,6 +150,18 @@ object PageCommands {
                 { window.scrollByJs(2_000_000); return Outcome.Handled("⤓ Bottom") }
         }
 
+        // Your own Bandcamp music, by name rather than by hunting the UI.
+        // Reaching purchases by hand means finding a profile picture and a
+        // menu item inside a 170px window; asking for them used to be worse,
+        // because "go to my purchases" was taken as a SEARCH and landed on a
+        // comedy track called "keeping track of my venmo purchases with an
+        // elaborate hieroglyphic system". Scoped to Bandcamp: "my purchases"
+        // means nothing in particular anywhere else, and guessing would be
+        // worse than declining.
+        if (hostStem(window.currentUrl) == "bandcamp") {
+            bandcampIntent(text)?.let { return it }
+        }
+
         // "search <q> on duckduckgo|google" — naming an engine is how you ask
         // to LEAVE the site. Tolerant of the spacing Whisper inserts.
         Regex(
@@ -152,13 +198,25 @@ object PageCommands {
             // whole utterance as a query silently drops the half the wearer
             // cared about. Detected by ACTION VERB after a conjunction, not by
             // the conjunction itself, so "search for cats and dogs" still works.
-            val wantsAction = Regex(
-                "\\b(?:and|then|,)\\s+(?:please\\s+)?" +
-                    "(?:play|open|click|press|start|select|choose|read|tell|summari[sz]e|" +
-                    "show|describe|explain|add|download|watch|listen)\\b",
-                RegexOption.IGNORE_CASE
-            ).containsMatchIn(q)
-            if (!wantsAction) return Outcome.SearchInPage(q)
+            val split = SEARCH_THEN_ACTION.find(q)
+                ?: return Outcome.SearchInPage(q)
+            val subject = split.groupValues[1].trim()
+            val action = split.groupValues[2].trim()
+
+            // Do the searching ourselves when we know how to search this site.
+            // Handing the whole thing to the agent only works when the target
+            // happens to be on the page already — "search for bit shifter and
+            // play their music" succeeded solely because the window was ALREADY
+            // on bit-shifter.bandcamp.com and the agent could hop within the
+            // site. Asked for a different artist from that same page it
+            // answered "Cannot play John Digweed from here", which is true and
+            // useless: it has no way to leave the page it is standing on.
+            siteSearchUrlForHost(window.currentUrl, subject)?.let { url ->
+                Log.d(TAG, "route=searchThenAgent subject='$subject' action='$action'")
+                return Outcome.SearchThenAgent(url, action, "🔎 $subject")
+            }
+            // No site search we recognise — the agent's in-page search box is
+            // still the best available answer, so this behaves as it always did.
             Log.d(TAG, "route=searchIsTask '$q'")
             return Outcome.ForAgent(raw.trim())
         }
@@ -296,6 +354,156 @@ object PageCommands {
      * Whisper hears these as two words about as often as one, so every
      * pattern tolerates internal spaces.
      */
+    /** The site name inside a host — "bit-shifter.bandcamp.com" -> "bandcamp". */
+    private fun hostStem(url: String?): String? {
+        val host = runCatching { java.net.URL(url ?: return null).host }
+            .getOrNull()?.lowercase() ?: return null
+        val labels = host.split('.').filter { it.isNotBlank() }
+        if (labels.size < 2) return null
+        return labels[labels.size - 2]
+    }
+
+    private val BC_PURCHASES = Regex(
+        "^(?:go to |open |show |take me to |see )?(?:my )?" +
+            "(?:bandcamp )?(?:purchases|collection|library|albums i bought|" +
+            "music i bought|what i bought|what i have bought)$",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val BC_SHUFFLE = Regex(
+        "^(?:shuffle|randomi[sz]e)(?: my)?(?: music| collection| library| purchases| albums)?$|" +
+            "^play (?:something|anything)(?: i own| from my collection| random)?$|" +
+            "^play (?:my )(?:music|collection|library|purchases)$",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** Bandcamp-only intents, or null to fall through to normal routing. */
+    private fun bandcampIntent(text: String): Outcome? = when {
+        BC_PURCHASES.matches(text) -> Outcome.NavigateThenScript(
+            url = BC_HOME,
+            notice = "Your Bandcamp collection",
+            js = BC_GO_TO_COLLECTION_JS
+        )
+        BC_SHUFFLE.matches(text) -> Outcome.NavigateThenScript(
+            url = BC_HOME,
+            notice = "Shuffling your collection",
+            js = BC_SHUFFLE_JS,
+            thenJs = BC_PRESS_PLAY_JS
+        )
+        else -> null
+    }
+
+    private const val BC_HOME = "https://bandcamp.com/"
+
+    /**
+     * Who is logged in, asked at RUNTIME.
+     *
+     * collection_summary answers for whichever fan owns the cookie, so this
+     * works for anyone who installs the app — there is no username, fan id or
+     * account anywhere in this source. The identity cookie is httpOnly, which
+     * is why this has to run as page script with credentials rather than from
+     * an OkHttp call in Kotlin: only the WebView's own jar can see it.
+     */
+    private const val BC_FAN_JS = """
+        function x3fan(){
+          return fetch('https://bandcamp.com/api/fan/2/collection_summary',
+                       {credentials:'include'})
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+              var s = j && j.collection_summary;
+              if (!s || !s.fan_id) throw new Error('not signed in');
+              return s;
+            });
+        }
+    """
+
+    private val BC_GO_TO_COLLECTION_JS = """
+        (function(){
+          $BC_FAN_JS
+          x3fan().then(function(s){
+            if (s.url) location.href = s.url;
+          }).catch(function(e){ console.log('X3BC ' + e); });
+        })();
+    """
+
+    /**
+     * Play something the wearer already owns, at random.
+     *
+     * Bandcamp's web collection has NO shuffle control — measured on the real
+     * page, there is no element matching shuffle by class, id, title or aria
+     * label, and the string does not appear in the markup at all. So shuffle
+     * here means what the wearer means by it: pick one of their purchases and
+     * play it. collection_items returns url_hints (subdomain + slug), which
+     * builds a playable address without scraping a grid that lazy-loads eight
+     * items at a time into a window this small.
+     */
+    private val BC_SHUFFLE_JS = """
+        (function(){
+          $BC_FAN_JS
+          x3fan().then(function(s){
+            return fetch('https://bandcamp.com/api/fancollection/1/collection_items', {
+              method: 'POST', credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                fan_id: s.fan_id, older_than_token: '9999999999::a::', count: 200
+              })
+            }).then(function(r){ return r.json(); });
+          }).then(function(j){
+            var items = (j && j.items) || [];
+            var playable = items.filter(function(it){
+              var h = it && it.url_hints;
+              return h && h.slug && (h.subdomain || h.custom_domain);
+            });
+            if (!playable.length) { console.log('X3BC nothing owned'); return; }
+            var it = playable[Math.floor(Math.random() * playable.length)];
+            var h = it.url_hints;
+            var base = h.custom_domain
+              ? ('https://' + h.custom_domain)
+              : ('https://' + h.subdomain + '.bandcamp.com');
+            var kind = (h.item_type === 't') ? 'track' : 'album';
+            location.href = base + '/' + kind + '/' + h.slug;
+          }).catch(function(e){ console.log('X3BC ' + e); });
+        })();
+    """
+
+    /**
+     * Press play once the album page arrives.
+     *
+     * Retried because the player is built after the document reports done,
+     * and bounded so a page that never produces one stops trying. Stops at
+     * the first button that actually starts audio rather than clicking every
+     * playbutton on the page — an album page has one per track, and clicking
+     * them all would race them against each other.
+     */
+    private val BC_PRESS_PLAY_JS = """
+        (function(){
+          var tries = 0;
+          function playing(){
+            var a = document.querySelectorAll('audio');
+            for (var i = 0; i < a.length; i++) if (!a[i].paused) return true;
+            return false;
+          }
+          var iv = setInterval(function(){
+            if (playing() || ++tries > 40) { clearInterval(iv); return; }
+            var b = document.querySelector('.playbutton');
+            if (b) b.click();
+          }, 400);
+        })();
+    """
+
+    /**
+     * Splits "<subject> and <verb> …" into the thing to look for and the
+     * thing to do with it. Anchored on an ACTION VERB after a conjunction so
+     * "search for cats and dogs" stays one query rather than becoming a
+     * search for cats and an attempt to do something to dogs.
+     */
+    private val SEARCH_THEN_ACTION = Regex(
+        "^(.+?)\\s+(?:and|then|,)\\s+(?:please\\s+)?" +
+            "((?:play|open|click|press|start|select|choose|read|tell|summari[sz]e|" +
+            "show|describe|explain|add|download|watch|listen)\\b.*)$",
+        RegexOption.IGNORE_CASE
+    )
+
     private val SITE_SEARCHES: List<Pair<Regex, String>> = listOf(
         Regex("^(?:the\\s+)?you\\s*tube(?:\\.com)?$", RegexOption.IGNORE_CASE)
             to "https://m.youtube.com/results?search_query=",
@@ -310,7 +518,15 @@ object PageCommands {
         Regex("^(?:the\\s+)?amazon(?:\\.com)?$", RegexOption.IGNORE_CASE)
             to "https://www.amazon.com/s?k=",
         Regex("^(?:the\\s+)?e\\s*bay(?:\\.com)?$", RegexOption.IGNORE_CASE)
-            to "https://www.ebay.com/sch/i.html?_nkw="
+            to "https://www.ebay.com/sch/i.html?_nkw=",
+        // Bandcamp hides its search behind a magnifier: the input[name=q] is
+        // in the DOM on every artist page but measures 0x0, so the in-page
+        // scorer rightly refuses it (typing into a zero-size field types into
+        // nothing) and the wearer got thrown to DuckDuckGo — while standing
+        // on the music site they were asking to search. Measured on device:
+        // bandcamp.com/search?q= returns 18 usable results for "bit shifter".
+        Regex("^(?:the\\s+)?band\\s*camp(?:\\.com)?$", RegexOption.IGNORE_CASE)
+            to "https://bandcamp.com/search?q="
     )
 
     /**

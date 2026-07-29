@@ -53,6 +53,14 @@ interface VoiceServiceApi {
     fun sendDebugText(text: String) {}
 
     /**
+     * Debug only: stream a raw 16 kHz mono PCM16 file from app-private
+     * storage through the same Gemini realtime-audio path as the microphone.
+     * The pipeline waits for setupComplete, so scripted voice tests cannot
+     * race the Live handshake.
+     */
+    fun sendDebugPcm16File(fileName: String) {}
+
+    /**
      * Put a picture in front of the assistant mid-session.
      *
      * Some pages ARE a picture — an image result, a chart, a scan — and
