@@ -175,14 +175,6 @@ object PageCommands {
             bandcampIntent(text)?.let { return it }
         }
 
-        // Radio Garden is a WebGL globe with NO search field anywhere in the
-        // document — the only input on a station page is a 0x0 volume slider.
-        // So the agent, told to search, could only advise the wearer to "use
-        // the search function", which is not reachable by anything it can do.
-        // The site's own API answers the question directly.
-        if (hostStem(window.currentUrl) == "radio") {
-            radioGardenIntent(text)?.let { return it }
-        }
 
         // "search <q> on duckduckgo|google" — naming an engine is how you ask
         // to LEAVE the site. Tolerant of the spacing Whisper inserts.
@@ -211,6 +203,23 @@ object PageCommands {
                 window.loadUrl(url)
                 return Outcome.Handled("🔎 $q on $site")
             }
+        }
+
+        // Radio Garden is a WebGL globe with NO search field anywhere in the
+        // document — the only input on a station page is a 0x0 volume slider.
+        // So the agent, told to search, could only advise the wearer to "use
+        // the search function", which nothing it can do will reach. The
+        // site's own API answers the question directly.
+        //
+        // Placed HERE, below the branches that read a named destination, and
+        // not above them. Sitting at the top of the router it swallowed
+        // everything: "search for cats on duckduckgo" tuned to a station
+        // called "cats on duckduckgo", because being on radio.garden was
+        // treated as meaning every request must be about radio. Naming
+        // another engine or site is exactly how a wearer says "leave here",
+        // and that has to win over the site we happen to be standing on.
+        if (hostStem(window.currentUrl) == "radio") {
+            radioGardenIntent(text)?.let { return it }
         }
 
         Regex("^search (?:for )?(.+)$").find(text)?.let { m ->
@@ -513,9 +522,25 @@ object PageCommands {
         })();
     """
 
+    // "go to" and "switch to" are gone on purpose: they are how a wearer asks
+    // to LEAVE, not how they pick a station, and having them here turned
+    // every navigation attempt into a tuning attempt.
     private val RG_TUNE = Regex(
-        "^(?:search (?:for )?|find |play |listen to |tune (?:in )?to |put on |" +
-            "switch to |go to )(.+?)(?: radio| station| fm| am)?$",
+        "^(?:search (?:for )?|find |play |listen to |tune (?:in )?to |put on )" +
+            "(.+?)(?: radio| station| fm| am)?$",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * A QUERY that names where to go — "cats on duckduckgo", "jazz on kexp"
+     * — is about somewhere else, whatever site we are standing on.
+     *
+     * Tested against the query and never the whole utterance: "put on kpfa"
+     * carries an "on" in the VERB, and matching the raw sentence refused to
+     * tune the one station the wearer actually named.
+     */
+    private val NAMES_A_DESTINATION = Regex(
+        "\\s+(?:on|in|at|using|via|from)\\s+\\S+$",
         RegexOption.IGNORE_CASE
     )
 
@@ -523,6 +548,7 @@ object PageCommands {
     private fun radioGardenIntent(text: String): Outcome? {
         val q = RG_TUNE.find(text)?.groupValues?.get(1)?.trim().orEmpty()
         if (q.isBlank() || q.length < 2) return null
+        if (NAMES_A_DESTINATION.containsMatchIn(q)) return null
         val encoded = URLEncoder.encode(q, "UTF-8")
         return Outcome.RunScript(
             js = rgTuneJs(encoded),
