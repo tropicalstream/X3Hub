@@ -107,6 +107,12 @@ class GeminiLiveClient(
                 "they mean. Also 'list' what is saved, or 'remove' one by title.\n" +
                 "CONSTRAINTS:\n" +
                 "- Do not read URLs aloud — open them with the browser tool instead.\n" +
+                "- SPEAK ONCE PER REQUEST. When a request needs a tool, call the tool " +
+                "FIRST and say nothing beforehand — no \"opening that now\", no " +
+                "narrating what you are about to do. Say one sentence AFTER the tool " +
+                "returns, and do not restate it. Announcing the action and then " +
+                "reporting it lands as the same thing said twice, which on glasses is " +
+                "just noise in the wearer\'s ear.\n" +
                 "- Answer in the language the user speaks to you."
 
         /** All known Gemini prebuilt voice names — unused (default voice), kept
@@ -469,11 +475,16 @@ class GeminiLiveClient(
                             }
                         }
 
+                        // turnComplete ONLY. generationComplete is a
+                        // different signal — the model finished producing
+                        // audio — and Live sends BOTH for a single turn
+                        // (verified against the endpoint). Treating either as
+                        // the end fired onTurnComplete twice per reply, which
+                        // committed the assistant\'s line to the chat history
+                        // twice over.
                         val turnComplete = serverContent.optCompletionFlag(
                             "turnComplete",
-                            "turn_complete",
-                            "generationComplete",
-                            "generation_complete"
+                            "turn_complete"
                         )
                         if (turnComplete) {
                             listener.onTurnComplete(null)
