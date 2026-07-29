@@ -1207,13 +1207,18 @@ class BrowserWindowView @JvmOverloads constructor(
 
     /** Hit-test in absolute screen coordinates — the space MainActivity's
      *  cursor works in. */
-    fun containsScreenPoint(screenX: Float, screenY: Float): Boolean {
+    @JvmOverloads
+    fun containsScreenPoint(
+        screenX: Float,
+        screenY: Float,
+        slackPx: Float = 0f
+    ): Boolean {
         if (visibility != VISIBLE || width == 0) return false
         getLocationOnScreen(locationScratch)
-        val left = locationScratch[0]
-        val top = locationScratch[1]
-        return screenX >= left && screenX < left + width &&
-            screenY >= top && screenY < top + height
+        val left = locationScratch[0] - slackPx
+        val top = locationScratch[1] - slackPx
+        return screenX >= left && screenX < left + width + 2 * slackPx &&
+            screenY >= top && screenY < top + height + 2 * slackPx
     }
 
     companion object {

@@ -2415,13 +2415,21 @@ class MainActivity : AppCompatActivity() {
                 leaveModifyMode("double-tap")
                 return
             }
-            // The cursor does not have to still be ON the window. A wearer who
-            // has chosen a window aims at it, double-taps, and is a few px off
-            // — and used to get a Gemini session toggled instead, with nothing
-            // said about why. An ACTIVE window owns the double-tap; with none
-            // active this is untouched and empty space still drives Gemini.
+            // The cursor does not have to be exactly ON the window — a wearer
+            // aims at it, double-taps, and the pad drifts a few px on the way
+            // down. But that forgiveness was unbounded: it took the active
+            // window from ANYWHERE on the display, so a double-tap in open
+            // space opened the page agent's microphone instead of cancelling
+            // Gemini. Since a window now stays selected until another is
+            // picked, that was almost always. Empty space has its own
+            // meaning — cancel the session, close the camera — and it cannot
+            // have it while a selection elsewhere outranks it. Forgiveness is
+            // now a margin around the window, not the whole board.
             val window = controller.browserWindowAt(pt.first, pt.second)
-                ?: controller.browserWindows().firstOrNull { it.isActive }
+                ?: controller.browserWindows().firstOrNull {
+                    it.isActive &&
+                        it.containsScreenPoint(pt.first, pt.second, DOUBLE_TAP_AIM_SLOP_PX)
+                }
             if (window != null) {
                 // SmartView's flow, and the thing that makes the agent an
                 // agent: the first double-tap OPENS THE MIC, the second ends
@@ -2723,6 +2731,16 @@ class MainActivity : AppCompatActivity() {
         private const val TRIPLE_TAP_WINDOW_MS = 400L
         // Inside BOTH windows, so `-e taps 3` really chains to a triple.
         private const val SYNTH_TAP_GAP_MS = 120L
+
+        /**
+         * How far off a window a double-tap may land and still mean it.
+         *
+         * Covers the pad's drift as the wearer presses (the same order as
+         * RIGHT_ARM_TAP_MOVE_TOLERANCE_PX) without swallowing the open board
+         * around it — a window is 170px wide on a 628px board, so this stays
+         * a margin rather than becoming the whole display.
+         */
+        private const val DOUBLE_TAP_AIM_SLOP_PX = 40f
 
         private const val LEFT_ARM_TAP_MOVE_TOLERANCE_PX = 60f
         // A right-pad touch that moves less than this (raw px) is a tap,
