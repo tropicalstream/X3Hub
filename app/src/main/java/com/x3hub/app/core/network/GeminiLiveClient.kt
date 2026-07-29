@@ -159,6 +159,18 @@ class GeminiLiveClient(
             return socket.send(payload.toString())
         }
 
+        /**
+         * Flush the server's automatic-VAD audio cache while pausing input.
+         * The next audio message reopens the stream on the same Live socket.
+         */
+        fun sendAudioStreamEnd(): Boolean {
+            val payload = JSONObject().put(
+                "realtimeInput",
+                JSONObject().put("audioStreamEnd", true)
+            )
+            return socket.send(payload.toString())
+        }
+
         fun sendImageChunkBase64(imageBase64: String, mimeType: String = "image/jpeg"): Boolean {
             if (imageBase64.isBlank()) return false
             val videoChunk = JSONObject()

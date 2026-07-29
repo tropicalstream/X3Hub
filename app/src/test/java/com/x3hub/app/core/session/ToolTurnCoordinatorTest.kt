@@ -34,11 +34,16 @@ class ToolTurnCoordinatorTest {
     fun exactRepeatedSuccessIsSuppressed() {
         val coordinator = coordinator()
 
-        assertTrue(coordinator.shouldDeliverTranscript("I opened the calendar window."))
+        assertTrue(coordinator.shouldDeliverTranscript("I opened"))
+        assertTrue(coordinator.shouldDeliverTranscript("the calendar window."))
         assertTrue(coordinator.onToolCall("open-2").hadSubstantialPreToolOutput)
         coordinator.onToolResult("open-2", succeeded = true)
 
-        assertFalse(coordinator.shouldDeliverTranscript("I opened the calendar window."))
+        // Gemini's Live transcription does not preserve whitespace across
+        // fragments, and the repeated sentence can use different boundaries.
+        assertFalse(coordinator.shouldDeliverTranscript("I"))
+        assertFalse(coordinator.shouldDeliverTranscript("opened the calendar"))
+        assertFalse(coordinator.shouldDeliverTranscript("window."))
         assertFalse(coordinator.shouldDeliverAudio(2_000))
 
         val completion = coordinator.onTurnComplete()

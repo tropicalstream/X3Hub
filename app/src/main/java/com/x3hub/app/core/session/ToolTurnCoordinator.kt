@@ -46,7 +46,8 @@ internal class ToolTurnCoordinator(
 
     private var deliveredTranscriptChars = 0
     private var deliveredAudioBytes = 0
-    private val deliveredTranscript = StringBuilder()
+    private val deliveredTokens = ArrayList<String>()
+    private val bufferedTokens = ArrayList<String>()
     private val bufferedTranscript = StringBuilder()
     private var bufferRemainder = false
 
@@ -59,10 +60,11 @@ internal class ToolTurnCoordinator(
     fun shouldDeliverTranscript(text: String): Boolean {
         if (bufferRemainder) {
             bufferedTranscript.append(text)
+            bufferedTokens.addAll(tokenize(text))
             return false
         }
         deliveredTranscriptChars += text.count { !it.isWhitespace() }
-        deliveredTranscript.append(text)
+        deliveredTokens.addAll(tokenize(text))
         return true
     }
 
@@ -122,8 +124,7 @@ internal class ToolTurnCoordinator(
     fun onTurnComplete(): TurnCompletion {
         val wasBuffered = bufferRemainder
         val postToolText = bufferedTranscript.toString()
-        val duplicate = wasBuffered &&
-            isNearDuplicate(deliveredTranscript.toString(), postToolText)
+        val duplicate = wasBuffered && isNearDuplicate(deliveredTokens, bufferedTokens)
         val completion = TurnCompletion(
             wasRemainderBuffered = wasBuffered,
             suppressAsDuplicate = duplicate,
@@ -152,7 +153,8 @@ internal class ToolTurnCoordinator(
     private fun resetTurn() {
         deliveredTranscriptChars = 0
         deliveredAudioBytes = 0
-        deliveredTranscript.setLength(0)
+        deliveredTokens.clear()
+        bufferedTokens.clear()
         bufferedTranscript.setLength(0)
         bufferRemainder = false
     }
@@ -170,9 +172,7 @@ internal class ToolTurnCoordinator(
      * multisets, requiring both high overlap and similar lengths. This avoids
      * suppressing a result that merely starts with the same preamble.
      */
-    private fun isNearDuplicate(first: String, second: String): Boolean {
-        val firstTokens = tokenize(first)
-        val secondTokens = tokenize(second)
+    private fun isNearDuplicate(firstTokens: List<String>, secondTokens: List<String>): Boolean {
         if (firstTokens.size < MIN_DUPLICATE_TOKENS ||
             secondTokens.size < MIN_DUPLICATE_TOKENS
         ) return false

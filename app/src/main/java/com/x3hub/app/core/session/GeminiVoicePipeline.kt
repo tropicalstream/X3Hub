@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -83,8 +84,11 @@ class GeminiVoicePipeline(context: Context) {
     @Volatile private var lastCameraFrameMs: Long = 0L
     @Volatile private var activeSessionEpoch: Long = 0L
 
-    /** Last moment either side was "active" — see the watchdog. */
-    @Volatile private var lastConversationActivityMs: Long = 0L
+    private val idlePolicy = ConversationIdlePolicy(
+        openingTimeoutMs = SILENCE_OPENING_MS,
+        idleTimeoutMs = SILENCE_END_MS,
+        responseTimeoutMs = RESPONSE_WAIT_MS
+    )
     private val toolCallsInFlight = AtomicInteger(0)
     private val toolTurnCoordinator = ToolTurnCoordinator()
     private val bufferedToolAudioLock = Any()
@@ -95,6 +99,9 @@ class GeminiVoicePipeline(context: Context) {
     /** True while a debug PCM fixture replaces live microphone frames. */
     @Volatile
     private var debugPcmInjectionActive: Boolean = false
+
+    /** True after audioStreamEnd, until new local speech reopens the stream. */
+    @Volatile private var serverAudioStreamPaused: Boolean = false
 
     /**
      * Late-output gate. Its only job is to drop duplicate
@@ -149,9 +156,10 @@ class GeminiVoicePipeline(context: Context) {
             Log.d(TAG, "activate(): already in progress / active, skipping")
             return
         }
-        heardUserYet = false
+        idlePolicy.reset(SystemClock.uptimeMillis())
         toolTurnCoordinator.resetSession()
         clearBufferedToolAudio()
+        serverAudioStreamPaused = false
         bargeInEnabled = HubPrefs.bargeInEnabled(appContext)
         Log.i(TAG, "activate(): barge-in ${if (bargeInEnabled) "on" else "off (wait for reply)"}")
 
@@ -256,6 +264,7 @@ class GeminiVoicePipeline(context: Context) {
         liveSessionReady = false
         localBargeAtMs = 0L
         debugPcmInjectionActive = false
+        serverAudioStreamPaused = false
         runCatching { session?.close() }
 
         connectJob?.cancel()
@@ -339,7 +348,7 @@ class GeminiVoicePipeline(context: Context) {
             "Local barge-in: mic=%.2f over gate=%.2f — cutting playback now"
                 .format(level, gate)
         )
-        noteConversationActivity()
+        noteUserActivity()
         runCatching { audioPlayer.stopAndFlush() }
         HudStateBridge.update {
             it.copy(
@@ -363,7 +372,6 @@ class GeminiVoicePipeline(context: Context) {
      */
     fun sendPageImage(base64Jpeg: String) {
         if (base64Jpeg.isBlank()) return
-        heardUserYet = true
         noteConversationActivity()
         // turnComplete=false: this is CONTEXT for a tool call already in
         // flight, not a question. Sent as a complete turn the model answered
@@ -381,8 +389,7 @@ class GeminiVoicePipeline(context: Context) {
 
     fun sendDebugText(text: String) {
         if (text.isBlank()) return
-        heardUserYet = true
-        noteConversationActivity()
+        noteUserActivity()
         // Attach the current camera frame, freshness-gated the same way the
         // tools are. Without it a typed question is blind even while the
         // preview is streaming — the video rides realtimeInput, and this turn
@@ -427,9 +434,9 @@ class GeminiVoicePipeline(context: Context) {
                 Log.w(TAG, "debug PCM is empty: $safeName")
                 return@launch
             }
-            heardUserYet = true
-            noteConversationActivity()
+            noteUserActivity()
             debugPcmInjectionActive = true
+            resumeServerAudioStream("debug voice turn")
             var offset = 0
             var sentFrames = 0
             try {
@@ -445,7 +452,7 @@ class GeminiVoicePipeline(context: Context) {
                     }
                     sentFrames++
                     offset = end
-                    noteConversationActivity()
+                    noteUserActivity()
                     delay(DEBUG_PCM_FRAME_MS)
                 }
             } finally {
@@ -456,19 +463,40 @@ class GeminiVoicePipeline(context: Context) {
     }
 
     private fun noteConversationActivity() {
-        lastConversationActivityMs = SystemClock.uptimeMillis()
+        idlePolicy.onConversationActivity(SystemClock.uptimeMillis())
+    }
+
+    private fun noteUserActivity() {
+        idlePolicy.onUserActivity(SystemClock.uptimeMillis())
+    }
+
+    private fun noteModelActivity() {
+        idlePolicy.onModelActivity(SystemClock.uptimeMillis())
     }
 
     /**
-     * False until the wearer has actually said something this session.
-     *
-     * The hang-up timer used to be the same 5s from the instant the socket
-     * opened, so activating the assistant and then taking a breath to
-     * decide what to ask lost the session before a word was spoken — and it
-     * closed silently, so the next thing said went nowhere. Gathering a
-     * thought is not the same as a conversation having ended.
+     * Automatic server VAD can retain a follow-up indefinitely when raw room
+     * audio never becomes clean enough to end the turn. audioStreamEnd is the
+     * API's explicit cache flush for a paused automatic-VAD stream.
      */
-    @Volatile private var heardUserYet: Boolean = false
+    @Synchronized
+    private fun pauseServerAudioStream(reason: String): Boolean {
+        if (serverAudioStreamPaused || !liveSessionReady) return false
+        serverAudioStreamPaused = true
+        val sent = runCatching {
+            liveSession?.sendAudioStreamEnd() == true
+        }.getOrDefault(false)
+        if (!sent) serverAudioStreamPaused = false
+        Log.i(TAG, "audioStreamEnd sent=$sent reason=$reason")
+        return sent
+    }
+
+    @Synchronized
+    private fun resumeServerAudioStream(reason: String) {
+        if (!serverAudioStreamPaused) return
+        serverAudioStreamPaused = false
+        Log.i(TAG, "Audio input stream resuming: $reason")
+    }
 
     private fun createListener(epoch: Long): GeminiLiveClient.LiveSessionListener {
         return object : GeminiLiveClient.LiveSessionListener {
@@ -476,7 +504,7 @@ class GeminiVoicePipeline(context: Context) {
                 if (!isSessionEpochCurrent(epoch)) return
                 Log.i(TAG, "onSessionReady")
                 liveSessionReady = true
-                noteConversationActivity()
+                idlePolicy.reset(SystemClock.uptimeMillis())
                 HudStateBridge.update {
                     it.copy(
                         connection = HudStateBridge.ConnectionStatus.GEMINI_CONNECTED,
@@ -491,8 +519,7 @@ class GeminiVoicePipeline(context: Context) {
             override fun onInputTranscription(text: String) {
                 if (!isSessionEpochCurrent(epoch)) return
                 if (text.isBlank()) return
-                heardUserYet = true
-                noteConversationActivity()
+                noteUserActivity()
                 latestInputTranscript = text
                 Log.d(TAG, "onInputTranscription: '${text.take(120)}'")
                 // Live partial transcript in the HUD; final commit happens
@@ -503,11 +530,11 @@ class GeminiVoicePipeline(context: Context) {
             override fun onOutputTranscription(text: String) {
                 if (!isSessionEpochCurrent(epoch)) return
                 if (text.isBlank()) return
-                noteConversationActivity()
                 if (SystemClock.uptimeMillis() < dropLateOutputUntilMs) {
                     Log.d(TAG, "Dropping late outputTranscription (post-turn window): '${text.take(120)}'")
                     return
                 }
+                noteModelActivity()
                 if (!toolTurnCoordinator.shouldDeliverTranscript(text)) {
                     Log.d(TAG, "Buffering possible repeated post-tool transcript: '${text.take(120)}'")
                     return
@@ -521,7 +548,7 @@ class GeminiVoicePipeline(context: Context) {
 
             override fun onModelText(text: String) {
                 if (!isSessionEpochCurrent(epoch)) return
-                if (text.isNotBlank()) noteConversationActivity()
+                if (text.isNotBlank()) noteModelActivity()
                 // Audio responses arrive via onOutputTranscription instead.
             }
 
@@ -556,7 +583,7 @@ class GeminiVoicePipeline(context: Context) {
                 localBargeAtMs = 0L
                 toolTurnCoordinator.onInterrupted()
                 clearBufferedToolAudio()
-                noteConversationActivity()
+                noteUserActivity()
                 runCatching { audioPlayer.stopAndFlush() }
                 HudStateBridge.update {
                     it.copy(
@@ -568,7 +595,7 @@ class GeminiVoicePipeline(context: Context) {
 
             override fun onToolCall(callId: String, name: String, args: String) {
                 if (!isSessionEpochCurrent(epoch)) return
-                noteConversationActivity()
+                noteModelActivity()
                 val decision = toolTurnCoordinator.onToolCall(callId)
                 if (!decision.shouldDispatch) {
                     Log.w(TAG, "Ignoring repeated tool call ID: callId=$callId name=$name")
@@ -584,7 +611,8 @@ class GeminiVoicePipeline(context: Context) {
 
             override fun onTurnComplete(finishReason: String?) {
                 if (!isSessionEpochCurrent(epoch)) return
-                noteConversationActivity()
+                val completedAt = SystemClock.uptimeMillis()
+                idlePolicy.onTurnComplete(completedAt)
                 val completion = toolTurnCoordinator.onTurnComplete()
                 val bufferedAudio = drainBufferedToolAudio()
                 if (completion.deliverBufferedRemainder) {
@@ -605,6 +633,12 @@ class GeminiVoicePipeline(context: Context) {
                         "Suppressed repeated post-tool remainder: " +
                             "text=${completion.bufferedTranscript.length} audioChunks=${bufferedAudio.size}"
                     )
+                }
+
+                // A completion after a follow-up started belongs to the prior
+                // turn and must not cut the new user's audio.
+                if (!idlePolicy.snapshot(completedAt).awaitingModelResponse) {
+                    pauseServerAudioStream("model turn complete")
                 }
                 Log.d(TAG, "onTurnComplete: finishReason=$finishReason")
                 // A finished turn ends any local mute: the next turn is a
@@ -683,7 +717,7 @@ class GeminiVoicePipeline(context: Context) {
     }
 
     private fun deliverModelAudio(mimeType: String, data: ByteArray) {
-        noteConversationActivity()
+        noteModelActivity()
         Log.d(TAG, "onModelAudio: ${data.size} bytes ($mimeType)")
         runCatching {
             audioPlayer.playChunk(mimeType, data, muted = false, volume = 1f)
@@ -717,13 +751,15 @@ class GeminiVoicePipeline(context: Context) {
     }
 
     /**
-     * Mars's spec: Gemini ends the conversation after 5 seconds of
-     * silence, timed whenever NEITHER side is speaking. "Activity" =
-     * user speech on the mic (level gate in the read loop) or any
-     * transcription event, model audio playing (write-time tracking in
-     * GeminiAudioPlayer), or a tool call in flight. The countdown also
-     * runs right after the session opens — connect it and say nothing
-     * for 5s and it closes.
+     * End an actually idle conversation after 5 seconds, but never confuse
+     * Gemini's response latency with mutual silence. Once the wearer begins a
+     * turn, [ConversationIdlePolicy] grants a bounded response wait until new
+     * model text/audio/tool output arrives.
+     *
+     * "Activity" = user speech on the mic (level gate in the read loop), any
+     * transcription event, model audio playing, or a tool call in flight.
+     * Opening grace remains longer so activating Gemini does not require the
+     * wearer to have the whole first question pre-composed.
      */
     private fun startSilenceWatchdog(epoch: Long) {
         silenceWatchdogJob?.cancel()
@@ -735,13 +771,24 @@ class GeminiVoicePipeline(context: Context) {
                 val busy = toolCallsInFlight.get() > 0 ||
                     audioPlayer.isActivelySpeaking(windowMs = 600L)
                 if (busy) {
-                    lastConversationActivityMs = now
+                    idlePolicy.onConversationActivity(now)
                     continue
                 }
-                val idleFor = now - lastConversationActivityMs
-                val limit = if (heardUserYet) SILENCE_END_MS else SILENCE_OPENING_MS
-                if (idleFor >= limit) {
-                    Log.i(TAG, "Silence watchdog: ${idleFor}ms of mutual silence — ending session")
+                val idle = idlePolicy.snapshot(now)
+                if (!serverAudioStreamPaused &&
+                    idle.shouldFlushPendingAudio(PENDING_AUDIO_FLUSH_MS)
+                ) {
+                    pauseServerAudioStream(
+                        "pending user turn idle for ${idle.idleForMs}ms"
+                    )
+                }
+                if (idle.shouldEnd) {
+                    Log.i(
+                        TAG,
+                        "Silence watchdog: ${idle.idleForMs}ms idle " +
+                            "(limit=${idle.timeoutMs}, waiting=${idle.awaitingModelResponse}) " +
+                            "— ending session"
+                    )
                     shutdown(reason = null)
                     break
                 }
@@ -785,6 +832,7 @@ class GeminiVoicePipeline(context: Context) {
             var loggedFirstFrame = false
             var bargeFrames = 0
             var userSpeakingUntilMs = 0L
+            val pausedPrefix = ArrayDeque<ByteArray>(STREAM_RESUME_PREFIX_FRAMES)
             while (captureActive && isSessionEpochCurrent(epoch)) {
                 val read = try {
                     recorder.read(chunk, 0, chunk.size)
@@ -799,10 +847,39 @@ class GeminiVoicePipeline(context: Context) {
                     }
                     val peak = calculatePcm16Peak(chunk, read)
                     val norm = (peak / 32_767f).coerceIn(0f, 1f)
+                    val modelSpeakingNow = audioPlayer.isActivelySpeaking()
+                    var sentResumePrefix = false
+
+                    // AudioRecord stays open while the SERVER stream is
+                    // paused. Keep a short prefix so resuming on speech does
+                    // not clip the first syllable.
+                    if (serverAudioStreamPaused && !debugPcmInjectionActive) {
+                        pausedPrefix.addLast(chunk.copyOf(read))
+                        while (pausedPrefix.size > STREAM_RESUME_PREFIX_FRAMES) {
+                            pausedPrefix.removeFirst()
+                        }
+                        if (!modelSpeakingNow && norm >= USER_STREAM_RESUME_LEVEL) {
+                            resumeServerAudioStream("local speech detected")
+                            noteUserActivity()
+                            for (prefix in pausedPrefix) {
+                                liveSession?.sendAudioChunkPcm16(
+                                    prefix, prefix.size, SAMPLE_RATE_HZ
+                                )
+                            }
+                            pausedPrefix.clear()
+                            sentResumePrefix = true
+                        } else {
+                            continue
+                        }
+                    } else if (!serverAudioStreamPaused) {
+                        pausedPrefix.clear()
+                    }
+
                     // A mic level clearly above ambient counts as the user
-                    // speaking for the mutual-silence watchdog.
-                    if (norm >= USER_SPEECH_LEVEL) {
-                        lastConversationActivityMs = SystemClock.uptimeMillis()
+                    // starting/continuing a turn. Do not mistake Gemini's own
+                    // speaker echo for a follow-up while playback is active.
+                    if (norm >= USER_SPEECH_LEVEL && !modelSpeakingNow) {
+                        noteUserActivity()
                     }
                     // Synchronous barge-in: cut Gemini off HERE, on the
                     // device, rather than waiting for the server's verdict to
@@ -825,7 +902,7 @@ class GeminiVoicePipeline(context: Context) {
                     // gate, the path stays open for [BARGE_HANGOVER_MS] so a
                     // whole utterance travels intact.
                     var suppressToServer = false
-                    if (audioPlayer.isActivelySpeaking() && !bargeInEnabled) {
+                    if (modelSpeakingNow && !bargeInEnabled) {
                         // Half-duplex: the wearer has asked Gemini to finish
                         // before listening again. Nothing is forwarded while
                         // it speaks, so no gate can be fooled and the model
@@ -833,7 +910,7 @@ class GeminiVoicePipeline(context: Context) {
                         suppressToServer = true
                         bargeFrames = 0
                         userSpeakingUntilMs = 0L
-                    } else if (audioPlayer.isActivelySpeaking()) {
+                    } else if (modelSpeakingNow) {
                         val out = audioPlayer.currentOutputLevel()
                         val gate = BARGE_BASE_LEVEL + BARGE_ECHO_REJECT * out
                         // Diagnostic: without real numbers, tuning this
@@ -883,7 +960,11 @@ class GeminiVoicePipeline(context: Context) {
                             )
                         }
                     }
-                    if (isSessionEpochCurrent(epoch) && !debugPcmInjectionActive) {
+                    if (isSessionEpochCurrent(epoch) &&
+                        !debugPcmInjectionActive &&
+                        !serverAudioStreamPaused &&
+                        !sentResumePrefix
+                    ) {
                         runCatching {
                             // Silence rather than a gap: the stream must stay
                             // continuous or the server's VAD reads the hole as
@@ -1005,6 +1086,19 @@ class GeminiVoicePipeline(context: Context) {
 
         /** Mars's spec: mutual silence that ends the conversation. */
         private const val SILENCE_END_MS = 5_000L
+
+        /** Maximum time to wait after user speech for Gemini to begin replying. */
+        private const val RESPONSE_WAIT_MS = 20_000L
+
+        /**
+         * If no model activity follows user audio, stop the continuous room
+         * feed and explicitly flush Gemini's automatic-VAD cache.
+         */
+        private const val PENDING_AUDIO_FLUSH_MS = 1_000L
+
+        /** Local threshold/prefix used to reopen a paused server stream. */
+        private const val USER_STREAM_RESUME_LEVEL = 0.06f
+        private const val STREAM_RESUME_PREFIX_FRAMES = 4
 
         /**
          * Grace before the FIRST utterance. Long enough to activate the
