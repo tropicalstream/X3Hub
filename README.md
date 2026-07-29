@@ -63,6 +63,11 @@ foreground Service, everything under the HUD strip.
 - **Web knowledge, your choice** — Settings toggle between **web search**
   (current-events grounding) and **reading links** (the assistant fetches and
   reads any URL you give it). The Live API allows only one at a time.
+- **Music, by voice** — Bandcamp and Radio Garden windows understand real
+  requests instead of just search-box guessing: "search for \<artist\> and
+  play their music," "go to my purchases," "shuffle my music," "play kpfa."
+  Resolved from whoever is actually signed in — nothing is hardcoded to one
+  account, so it works the same for anyone who installs the app.
 
 ---
 
@@ -80,6 +85,15 @@ the assistant always acts on the window you've selected.
 | *"Play the first result."* / *"Search this page for X."* / *"Log in."* | Hands a task to the page agent — clicking, typing, scrolling inside the active window. |
 | *"Close that."* / *"Scroll down."* / *"Go back."* / *"Make it bigger."* | Window control: close / scroll / navigate / resize the active window. |
 | *"What is this a picture of?"* / *"Identify this."* | The assistant looks at the window (even with no text on the page) and describes it. |
+
+### Music & radio (Bandcamp / Radio Garden)
+
+| Say | What happens |
+|---|---|
+| *"Search for Bit Shifter and play their music."* | Searches Bandcamp, opens the artist, and plays — one request, not three. |
+| *"Go to my purchases."* / *"Open my collection."* | Your Bandcamp collection — whoever is signed in, not a fixed account. |
+| *"Shuffle my music."* | Plays a random album from what you actually own. Bandcamp's web player has no shuffle button, so this is the real substitute. |
+| *"Play KPFA."* / *"Tune to KEXP."* | Finds the station on Radio Garden and starts it — including past its "Start Radio Garden" splash, which used to load silently. |
 
 ### HUD pins
 
