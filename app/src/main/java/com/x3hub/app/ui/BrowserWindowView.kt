@@ -835,21 +835,35 @@ class BrowserWindowView @JvmOverloads constructor(
 
     /** Give YouTube its sound back — see [MEDIA_AUTOPLAY_JS]. */
     private fun injectMediaAutoplay() {
-        if (!autoplayWithSound) return
+        if (!autoplayWithSound || mediaHeldForMic) return
         runCatching { webView.evaluateJavascript(MEDIA_AUTOPLAY_JS, null) }
     }
+
+    /** True while the host is holding this window quiet for the microphone. */
+    private var mediaHeldForMic = false
 
     /**
      * Hold page media while the microphone is open — see [MEDIA_SUSPEND_JS].
      * Safe to call on a window that is playing nothing.
+     *
+     * The flag matters as much as the pause. A window CREATED during a live
+     * session — which is the ordinary way a video window is born, the wearer
+     * says "open that video" while the assistant is listening — has no media
+     * to pause yet, so pausing alone does nothing and the page then unmutes
+     * itself a second later straight into the open microphone. Holding the
+     * flag means such a window never unmutes in the first place, and gets
+     * its voice when the mic closes.
      */
     fun setMediaSuspended(suspended: Boolean) {
+        mediaHeldForMic = suspended
         runCatching {
             webView.evaluateJavascript(
                 if (suspended) MEDIA_SUSPEND_JS else MEDIA_RESUME_JS,
                 null
             )
         }
+        // Catch up on release: the page skipped its unmute while held.
+        if (!suspended) injectMediaAutoplay()
     }
 
     // ------------------------------------------------------------------
@@ -1534,7 +1548,7 @@ class BrowserWindowView @JvmOverloads constructor(
               // survives a soft navigation, so re-entry is the normal case.
               if (window.__x3Media) { window.__x3Media.rearm(); return; }
 
-              var armedFor = null, tries = 0, timer = 0;
+              var armedFor = null, deadline = 0, timer = 0, nudged = 0;
 
               // Which video the URL is ASKING for. '' for the feed, search,
               // a channel — anywhere without a player of its own. Feed
@@ -1561,13 +1575,17 @@ class BrowserWindowView @JvmOverloads constructor(
 
               function attempt(id){
                 var v = document.querySelector('video');
-                if (!v) { tries++; return false; }
+                if (!v) return false;
                 // The other half of this patch pauses page media while the
                 // microphone is open. Playing it again here would hand the
                 // wearer's own video straight back to the recorder — and
                 // this is not a failed attempt, so it must not burn a try.
-                if (v.__x3Held) return false;
-                tries++;
+                //
+                // __x3Hold is the document-wide form, for a loop that was
+                // already spinning when the hold arrived: the per-element
+                // mark only lands on media that existed at that moment, and
+                // a video that starts DURING a session would carry none.
+                if (v.__x3Held || window.__x3Hold) return false;
                 var p = document.querySelector('#movie_player');
                 // Act only once the player is on the video the URL names.
                 // The <video> NODE IS REUSED across a soft navigation, so a
@@ -1577,8 +1595,16 @@ class BrowserWindowView @JvmOverloads constructor(
                 // The player owns the mute state; writing the element
                 // behind its back leaves its UI disagreeing with the sound,
                 // and it pushes its own value back at the next state change.
-                try { p.unMute(); p.setVolume(100); } catch (e) {}
-                if (v.paused) { try { p.playVideo(); } catch (e) {} }
+                try { p.unMute(); } catch (e) {}
+                // Lift the level only off the floor. Setting 100 every time
+                // would stamp on a volume the wearer had just chosen, every
+                // time they moved to the next video.
+                try { if (p.getVolume() === 0) p.setVolume(100); } catch (e) {}
+                // At most ONE nudge per video. Autoplay is already permitted
+                // here, so a second is never what starts a video — but it IS
+                // what undoes a wearer who reached up and paused it. The
+                // loop's business is the mute state, not the transport.
+                if (v.paused && !nudged) { nudged = 1; try { p.playVideo(); } catch (e) {} }
                 // Ask the PLAYER whether it took. Reading v.muted back after
                 // writing v.muted = false is a tautology — it would report
                 // success on the very first tick, including ticks where the
@@ -1593,19 +1619,28 @@ class BrowserWindowView @JvmOverloads constructor(
 
               // The player boots asynchronously and is usually absent when
               // the page reports finished, so one shot at load is a coin
-              // flip. Bounded at ~21s: past that the page is not going to
-              // produce a player, and an unbounded timer on a window that
-              // may sit on the HUD for an hour is litter.
+              // flip.
+              //
+              // Bounded by WALL CLOCK, not by a tick count. A pre-roll ad is
+              // a different video as far as the player is concerned — its own
+              // id sits in getVideoData() for the ad's whole duration — so
+              // every tick during an ad is a legitimate "not yet", and a
+              // 60-tick budget would be spent by a 30s ad and torn down at
+              // the exact moment the real content starts. Two minutes leaves
+              // room for an ad and then some; past that the page is simply
+              // not going to produce this video, and an unbounded timer on a
+              // window that may sit on the HUD for an hour is litter.
               function rearm(){
                 var id = wantedId();
                 if (!id) { armedFor = null; stop(); return; }
                 if (id === armedFor) return;
                 armedFor = id;
-                tries = 0;
+                nudged = 0;
+                deadline = Date.now() + 120000;
                 stop();
                 if (attempt(id)) return;
                 timer = setInterval(function(){
-                  if (attempt(id) || tries > 60) stop();
+                  if (attempt(id) || Date.now() > deadline) stop();
                 }, 350);
               }
 
@@ -1642,6 +1677,7 @@ class BrowserWindowView @JvmOverloads constructor(
          */
         private val MEDIA_SUSPEND_JS = """
             (function(){
+              window.__x3Hold = 1;
               var m = document.querySelectorAll('video,audio');
               for (var i = 0; i < m.length; i++) {
                 if (!m[i].paused) { try { m[i].pause(); m[i].__x3Held = 1; } catch(e){} }
@@ -1651,6 +1687,7 @@ class BrowserWindowView @JvmOverloads constructor(
 
         private val MEDIA_RESUME_JS = """
             (function(){
+              window.__x3Hold = 0;
               var m = document.querySelectorAll('video,audio');
               for (var i = 0; i < m.length; i++) {
                 if (m[i].__x3Held) { m[i].__x3Held = 0; try { m[i].play(); } catch(e){} }

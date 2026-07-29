@@ -1559,6 +1559,14 @@ class MainActivity : AppCompatActivity() {
             agentFor(w)
             w.onPageInputFocus = { showOnScreenKeyboard(w) }
             w.onPageInputBlur = { }   // the hide timer owns dismissal
+            // A window born while the mic is open must be born quiet. This
+            // is the ordinary case, not an edge one: "open that video" is
+            // said TO a live session, so the window appears while Gemini is
+            // still listening. refreshPageMediaHold only reaches windows
+            // that existed when the hold was taken, so without this the
+            // video would come up at full volume into the open microphone —
+            // barge-in would read it as the wearer and cut the reply off.
+            if (pageMediaSuspended) w.setMediaSuspended(true)
         }
         WindowBridge.setHandler { action, arg, reply ->
             uiHandler.post { handleWindowAction(action, arg, reply) }
