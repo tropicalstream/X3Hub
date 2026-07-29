@@ -523,6 +523,30 @@ class HudPinBoardController(
         container.setOnClickListener {
             if (modifyPinId != null) exitModifyMode() else openPin(pin)
         }
+
+        // A browser window steps through its own size ladder, and the box
+        // above was measured ONCE when the pin was built. Nothing told the
+        // container about it afterwards — onWindowSizeChanged was declared,
+        // fired, and listened to by nobody — so after a resize the container
+        // still held the old dimensions. The window drew at its new size
+        // inside a stale box, and the ✕ chip, which hangs off the
+        // container's top-right by gravity, appeared away from the window's
+        // actual corner: floating inside a shrunken window, or stranded
+        // short of a grown one.
+        if (content is BrowserWindowView) {
+            content.onWindowSizeChanged = { newW, newH ->
+                (container.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                    if (lp.width != newW || lp.height != newH) {
+                        lp.width = newW
+                        lp.height = newH
+                        // Growing near an edge would otherwise push the
+                        // window off the board, taking the chip with it.
+                        clampToZone(lp, newW, newH, lastZone ?: computeZone())
+                        container.layoutParams = lp
+                    }
+                }
+            }
+        }
         return container
     }
 

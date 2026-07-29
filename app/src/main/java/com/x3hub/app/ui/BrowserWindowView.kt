@@ -1095,13 +1095,27 @@ class BrowserWindowView @JvmOverloads constructor(
         val wv = webView
         if (wv.url.isNullOrBlank()) return
         val url = wv.url ?: return
-        wv.evaluateJavascript("(window.scrollY|0)") { value ->
-            pendingScrollCssY = value?.trim()?.toFloatOrNull()?.toInt()
-            // loadUrl, NOT reload: a reload restores the page's previous
-            // zoom state and the new initial scale is ignored, which is
-            // exactly the bug this exists to fix. A fresh navigation is
-            // what makes the engine adopt it.
-            wv.loadUrl(url)
+        // Never throw away a page that is PLAYING something. The reload
+        // below exists to re-wrap text at the new scale — and a video has no
+        // text to re-wrap: the player fills the window and follows the
+        // viewport on its own. Reloading a video window cost the wearer
+        // their place in it, restarted playback from zero, re-buffered, and
+        // on an ad-bearing page played the pre-roll again — all to fix a
+        // line-wrap problem that page does not have. Resizing a video is
+        // exactly when someone is settling in to watch it.
+        wv.evaluateJavascript(MEDIA_PLAYING_JS) { playing ->
+            if (playing?.trim() == "true") {
+                Log.i(TAG, "resize: media playing — keeping the page, no reload")
+                return@evaluateJavascript
+            }
+            wv.evaluateJavascript("(window.scrollY|0)") { value ->
+                pendingScrollCssY = value?.trim()?.toFloatOrNull()?.toInt()
+                // loadUrl, NOT reload: a reload restores the page's previous
+                // zoom state and the new initial scale is ignored, which is
+                // exactly the bug this exists to fix. A fresh navigation is
+                // what makes the engine adopt it.
+                wv.loadUrl(url)
+            }
         }
     }
 
@@ -1675,6 +1689,17 @@ class BrowserWindowView @JvmOverloads constructor(
          * Only what WE paused is resumed, so a video the wearer had already
          * paused stays paused.
          */
+        /** True while anything on the page is actually making sound/motion. */
+        private val MEDIA_PLAYING_JS = """
+            (function(){
+              var m = document.querySelectorAll('video,audio');
+              for (var i = 0; i < m.length; i++) {
+                if (!m[i].paused && !m[i].ended) return true;
+              }
+              return false;
+            })();
+        """
+
         private val MEDIA_SUSPEND_JS = """
             (function(){
               window.__x3Hold = 1;
