@@ -857,10 +857,16 @@ class BrowserWindowView @JvmOverloads constructor(
             if (value && !was) injectMediaAutoplay()
         }
 
-    /** Give YouTube its sound back — see [MEDIA_AUTOPLAY_JS]. */
+    /**
+     * Make a page that is MEANT to be playing actually play — see
+     * [MEDIA_AUTOPLAY_JS] for YouTube and [RADIO_GARDEN_START_JS] for Radio
+     * Garden. Each script scopes itself by host, so both are safe to run on
+     * any page; neither does anything away from its own site.
+     */
     private fun injectMediaAutoplay() {
         if (!autoplayWithSound || mediaHeldForMic) return
         runCatching { webView.evaluateJavascript(MEDIA_AUTOPLAY_JS, null) }
+        runCatching { webView.evaluateJavascript(RADIO_GARDEN_START_JS, null) }
     }
 
     /** True while the host is holding this window quiet for the microphone. */
@@ -1713,6 +1719,42 @@ class BrowserWindowView @JvmOverloads constructor(
          * Only what WE paused is resumed, so a video the wearer had already
          * paused stays paused.
          */
+        /**
+         * Open Radio Garden's front door whenever a station page arrives.
+         *
+         * Radio Garden loads behind a full-window "Start Radio Garden" cover
+         * and plays nothing at all until it is dismissed. Tuning by voice
+         * already clicks it, but a station reached ANY OTHER WAY sat silent:
+         * the wearer pinned a playing station to the HUD, tapped the pin, and
+         * got the right page with no sound — the bookmark was correct, the
+         * cover was simply back. Same for a link, a restored window, or the
+         * back button. Dismissing it on arrival is what makes the pin mean
+         * what it looks like it means.
+         *
+         * Only on a STATION path. On the bare globe the cover is a real
+         * choice — dismissing it there would start playing whatever the
+         * planet happened to be pointing at, which nobody asked for.
+         *
+         * Whether this worked cannot be read from the DOM: Radio Garden
+         * plays through Web Audio, so there is no <audio> element even while
+         * sound is coming out. Verified on device as a live USAGE_MEDIA
+         * track in dumpsys alongside nAudio 0.
+         */
+        private val RADIO_GARDEN_START_JS = """
+            (function(){
+              if (!/(^|\.)radio\.garden${'$'}/.test(location.hostname || '')) return;
+              if (!/^\/(listen|visit)\//.test(location.pathname || '')) return;
+              if (window.__x3RgStart) return;
+              window.__x3RgStart = 1;
+              var tries = 0;
+              var iv = setInterval(function(){
+                var gate = document.querySelector('[aria-label="Start Radio Garden"]');
+                if (gate) { try { gate.click(); } catch (e) {} }
+                if (++tries > 50) clearInterval(iv);
+              }, 400);
+            })();
+        """
+
         /** True while anything on the page is actually making sound/motion. */
         private val MEDIA_PLAYING_JS = """
             (function(){
