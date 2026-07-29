@@ -255,6 +255,15 @@ class MainActivity : AppCompatActivity() {
                 showNotice("Agent: ${outcome.task.take(46)}")
                 agentFor(window).run(outcome.task)
             }
+            is PageCommands.Outcome.RunScript -> {
+                showNotice(outcome.notice)
+                // Armed before the script runs, because the script is what
+                // navigates — register after it and the page is already gone.
+                outcome.thenJs?.let { after ->
+                    window.runAfterNextPageFinish { window.evaluateJavascript(after) }
+                }
+                window.evaluateJavascript(outcome.js)
+            }
             is PageCommands.Outcome.NavigateThenScript -> {
                 showNotice(outcome.notice)
                 window.runAfterNextPageFinish {

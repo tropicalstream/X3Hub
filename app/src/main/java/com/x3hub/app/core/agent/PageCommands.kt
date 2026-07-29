@@ -66,6 +66,19 @@ object PageCommands {
             val js: String,
             val thenJs: String? = null
         ) : Outcome()
+
+        /**
+         * Run [js] on the page as it stands, and if it navigates, run [thenJs]
+         * when the next document lands.
+         *
+         * For a site whose own API can answer from where we already are —
+         * no hop needed, unlike Bandcamp's cross-origin wall.
+         */
+        data class RunScript(
+            val js: String,
+            val notice: String,
+            val thenJs: String? = null
+        ) : Outcome()
         /** Abort whatever the agent is doing, now. */
         object StopAgent : Outcome()
     }
@@ -160,6 +173,15 @@ object PageCommands {
         // worse than declining.
         if (hostStem(window.currentUrl) == "bandcamp") {
             bandcampIntent(text)?.let { return it }
+        }
+
+        // Radio Garden is a WebGL globe with NO search field anywhere in the
+        // document — the only input on a station page is a 0x0 volume slider.
+        // So the agent, told to search, could only advise the wearer to "use
+        // the search function", which is not reachable by anything it can do.
+        // The site's own API answers the question directly.
+        if (hostStem(window.currentUrl) == "radio") {
+            radioGardenIntent(text)?.let { return it }
         }
 
         // "search <q> on duckduckgo|google" — naming an engine is how you ask
@@ -487,6 +509,79 @@ object PageCommands {
             if (playing() || ++tries > 40) { clearInterval(iv); return; }
             var b = document.querySelector('.playbutton');
             if (b) b.click();
+          }, 400);
+        })();
+    """
+
+    private val RG_TUNE = Regex(
+        "^(?:search (?:for )?|find |play |listen to |tune (?:in )?to |put on |" +
+            "switch to |go to )(.+?)(?: radio| station| fm| am)?$",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** Radio Garden intents, or null to fall through to normal routing. */
+    private fun radioGardenIntent(text: String): Outcome? {
+        val q = RG_TUNE.find(text)?.groupValues?.get(1)?.trim().orEmpty()
+        if (q.isBlank() || q.length < 2) return null
+        val encoded = URLEncoder.encode(q, "UTF-8")
+        return Outcome.RunScript(
+            js = rgTuneJs(encoded),
+            notice = "Tuning to $q",
+            thenJs = RG_START_JS
+        )
+    }
+
+    /**
+     * Find a station by name and go to it.
+     *
+     * Radio Garden's own search endpoint answers from the same origin, so
+     * unlike Bandcamp there is no hop: the page we are standing on can ask
+     * directly. Channels only — a search for a city also returns places, and
+     * "play KPFA" means the station, not a pin on a globe.
+     */
+    private fun rgTuneJs(encodedQuery: String): String = """
+        (function(){
+          fetch('https://radio.garden/api/search?q=$encodedQuery',
+                {credentials:'include'})
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+              var hits = (j && j.hits && j.hits.hits) || [];
+              var chan = null;
+              for (var i = 0; i < hits.length; i++) {
+                var s = hits[i] && hits[i]._source;
+                var p = s && s.page;
+                if (p && p.url && (p.type === 'channel' || s.type === 'channel')) {
+                  chan = p; break;
+                }
+              }
+              if (!chan) { console.log('X3RG no station'); return; }
+              console.log('X3RG tuning ' + chan.title + ' -> ' + chan.url);
+              location.href = 'https://radio.garden' + chan.url;
+            })
+            .catch(function(e){ console.log('X3RG ' + e); });
+        })();
+    """
+
+    /**
+     * Get past the front door.
+     *
+     * Radio Garden opens behind a full-window "Start Radio Garden" cover and
+     * plays nothing at all until it is dismissed — a station page loads with
+     * the right title and zero audio, which reads as a dead window. Retried
+     * because the cover is drawn after the document reports done.
+     *
+     * Do not look for an <audio> element to decide whether this worked:
+     * Radio Garden plays through Web Audio, so the DOM shows no media even
+     * while sound is coming out. Measured on device — nAudio 0 with a live
+     * USAGE_MEDIA track in dumpsys.
+     */
+    private val RG_START_JS = """
+        (function(){
+          var tries = 0;
+          var iv = setInterval(function(){
+            var gate = document.querySelector('[aria-label="Start Radio Garden"]');
+            if (gate) { try { gate.click(); } catch (e) {} }
+            if (++tries > 50) clearInterval(iv);
           }, 400);
         })();
     """
