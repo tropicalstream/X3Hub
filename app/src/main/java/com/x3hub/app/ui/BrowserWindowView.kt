@@ -765,6 +765,7 @@ class BrowserWindowView @JvmOverloads constructor(
                 injectSiteChromeFilters()
                 injectInputHooks()
                 injectImageFit()
+                injectMediaAutoplay()
                 onPageStartedListener?.invoke(url)
             }
 
@@ -783,6 +784,7 @@ class BrowserWindowView @JvmOverloads constructor(
                 injectSiteChromeFilters()
                 injectInputHooks()
                 injectImageFit()
+                injectMediaAutoplay()
                 restoreScrollAfterResize()
                 if (BuildConfig.DEBUG) {
                     view?.evaluateJavascript(
@@ -816,6 +818,40 @@ class BrowserWindowView @JvmOverloads constructor(
         runCatching { webView.evaluateJavascript(SITE_CHROME_FILTER_JS, null) }
     }
 
+    /**
+     * Whether this window may unmute media on its own.
+     *
+     * False for a window restored from a previous session until the wearer
+     * touches it — see HudPinStore.wasRestoredFromDisk. Turning it on makes
+     * the page catch up immediately rather than waiting for a navigation,
+     * because a wearer who just clicked a silent video expects sound now.
+     */
+    var autoplayWithSound: Boolean = true
+        set(value) {
+            val was = field
+            field = value
+            if (value && !was) injectMediaAutoplay()
+        }
+
+    /** Give YouTube its sound back — see [MEDIA_AUTOPLAY_JS]. */
+    private fun injectMediaAutoplay() {
+        if (!autoplayWithSound) return
+        runCatching { webView.evaluateJavascript(MEDIA_AUTOPLAY_JS, null) }
+    }
+
+    /**
+     * Hold page media while the microphone is open — see [MEDIA_SUSPEND_JS].
+     * Safe to call on a window that is playing nothing.
+     */
+    fun setMediaSuspended(suspended: Boolean) {
+        runCatching {
+            webView.evaluateJavascript(
+                if (suspended) MEDIA_SUSPEND_JS else MEDIA_RESUME_JS,
+                null
+            )
+        }
+    }
+
     // ------------------------------------------------------------------
     // State machine
     // ------------------------------------------------------------------
@@ -825,6 +861,11 @@ class BrowserWindowView @JvmOverloads constructor(
         // Even if already active — a wearer clicking a still expects it to
         // come alive, and an early return would leave a dead picture.
         wakeFromSnapshot()
+        // Choosing a window is the wearer asking for it, so a restored one
+        // is allowed its sound from here on. Set before the early return:
+        // the click that grants it is often on a window that is ALREADY
+        // active, and returning first would leave it mute forever.
+        autoplayWithSound = true
         if (isActive && !isModifying) return
         isModifying = false
         isActive = true
@@ -1440,6 +1481,183 @@ class BrowserWindowView @JvmOverloads constructor(
          * viewport is the thing in the way, which is O(1) instead of a
          * getComputedStyle over every node on the page.
          */
+        /**
+         * Make YouTube play with the sound on.
+         *
+         * A video opened in a window autoplays perfectly well —
+         * mediaPlaybackRequiresUserGesture is already false, so Chromium
+         * permits it — but it arrives MUTED, and on glasses there is no
+         * comfortable way to hit a small unmute button in a 170px window.
+         *
+         * The cause is not the WebView policy. Probing a real video on the
+         * device showed navigator.userActivation.hasBeenActive === false:
+         * nothing in a HUD window is ever "clicked" the way a page expects,
+         * so YouTube's own player takes its no-user-activation branch and
+         * starts muted defensively, exactly as it would in a browser that
+         * forbids unmuted autoplay. Chromium is allowing sound; YouTube is
+         * declining to make any.
+         *
+         * So the fix has to talk to the PLAYER, not the platform:
+         * #movie_player.unMute() + setVolume(100). Measured on device, this
+         * takes hold and stays — still unmuted, still playing, seconds later
+         * — and dumpsys shows a real started USAGE_MEDIA track, so this is
+         * audible output and not just a DOM flag flipped in the dark.
+         *
+         * Two things were tried first and are deliberately NOT here:
+         *
+         *  - Seeding localStorage 'yt-player-volume' with muted:false before
+         *    the player boots. The seed was written and survived the
+         *    navigation intact — and the next video still came up muted.
+         *    The decision is driven by user activation, not by the wearer's
+         *    remembered volume, so this layer is pure dead weight.
+         *  - Re-arming on 'yt-navigate-finish'. It never fires on
+         *    m.youtube.com; a spy on six candidate yt-* events caught none
+         *    of them across a real in-page navigation. Only a plain
+         *    location.href poll saw it. The desktop advice is wrong here.
+         *
+         * Scoped to YouTube on purpose, and within YouTube to pages that
+         * ARE a video (/watch, /shorts, /live, /embed). A general "unmute
+         * anything that autoplays" would hand every news site's pre-roll ad
+         * a speaker on the wearer's temple, and unmuting the feed's inline
+         * previews would do the same thing one scroll at a time.
+         *
+         * The latch is per-URL: unmute once, then stop and stay stopped. If
+         * the wearer mutes the video themselves, nothing fights them back.
+         * A new URL is new intent, so it re-arms.
+         */
+        private val MEDIA_AUTOPLAY_JS = """
+            (function(){
+              var H = location.hostname || '';
+              if (!/(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)${'$'}/.test(H)) return;
+
+              // Injected at BOTH page-start and page-finish, and the document
+              // survives a soft navigation, so re-entry is the normal case.
+              if (window.__x3Media) { window.__x3Media.rearm(); return; }
+
+              var armedFor = null, tries = 0, timer = 0;
+
+              // Which video the URL is ASKING for. '' for the feed, search,
+              // a channel — anywhere without a player of its own. Feed
+              // previews are muted deliberately and unmuting them would be
+              // both a surprise and a fight, since that is the one context
+              // where YouTube re-applies mute on its own.
+              function wantedId(){
+                var path = location.pathname || '';
+                var m = path.match(/^\/(shorts|live|embed)\/([\w-]{6,})/);
+                if (m) return m[2];
+                if (path === '/watch') {
+                  var q = (location.search || '').match(/[?&]v=([\w-]{6,})/);
+                  return q ? q[1] : '';
+                }
+                return '';
+              }
+
+              function playing(p){
+                try {
+                  var d = p && p.getVideoData && p.getVideoData();
+                  return (d && d.video_id) || '';
+                } catch (e) { return ''; }
+              }
+
+              function attempt(id){
+                var v = document.querySelector('video');
+                if (!v) { tries++; return false; }
+                // The other half of this patch pauses page media while the
+                // microphone is open. Playing it again here would hand the
+                // wearer's own video straight back to the recorder — and
+                // this is not a failed attempt, so it must not burn a try.
+                if (v.__x3Held) return false;
+                tries++;
+                var p = document.querySelector('#movie_player');
+                // Act only once the player is on the video the URL names.
+                // The <video> NODE IS REUSED across a soft navigation, so a
+                // previous clip's healthy state would otherwise read as
+                // success for a new one that has not even loaded yet.
+                if (!p || !p.unMute || playing(p) !== id) return false;
+                // The player owns the mute state; writing the element
+                // behind its back leaves its UI disagreeing with the sound,
+                // and it pushes its own value back at the next state change.
+                try { p.unMute(); p.setVolume(100); } catch (e) {}
+                if (v.paused) { try { p.playVideo(); } catch (e) {} }
+                // Ask the PLAYER whether it took. Reading v.muted back after
+                // writing v.muted = false is a tautology — it would report
+                // success on the very first tick, including ticks where the
+                // player had not booted yet, and tear down the retry loop
+                // that was the entire point.
+                var ok = false;
+                try { ok = (p.isMuted() === false); } catch (e) { ok = false; }
+                return ok && !v.paused;
+              }
+
+              function stop(){ if (timer) { clearInterval(timer); timer = 0; } }
+
+              // The player boots asynchronously and is usually absent when
+              // the page reports finished, so one shot at load is a coin
+              // flip. Bounded at ~21s: past that the page is not going to
+              // produce a player, and an unbounded timer on a window that
+              // may sit on the HUD for an hour is litter.
+              function rearm(){
+                var id = wantedId();
+                if (!id) { armedFor = null; stop(); return; }
+                if (id === armedFor) return;
+                armedFor = id;
+                tries = 0;
+                stop();
+                if (attempt(id)) return;
+                timer = setInterval(function(){
+                  if (attempt(id) || tries > 60) stop();
+                }, 350);
+              }
+
+              window.__x3Media = { rearm: rearm };
+              rearm();
+              // Keyed on the VIDEO ID rather than the href. YouTube rewrites
+              // its own query string under a stationary video (&t=, &pp=),
+              // and re-arming on that would shove the volume back to 100 in
+              // the middle of watching something. The id is what actually
+              // changes when the video does. Cost is a string compare at 2Hz
+              // — no yt-* event fires here to hang this on.
+              setInterval(function(){ if (wantedId() !== armedFor) rearm(); }, 500);
+            })();
+        """
+
+        /**
+         * Silence page media while the microphone is open, and put it back.
+         *
+         * This is the other half of unmuting YouTube, and without it the
+         * feature quietly breaks the app's main interface. The speakers sit
+         * on the temples, centimetres from the mic. A video that is finally
+         * audible is therefore also audible TO US: double-tapping a playing
+         * window to give the page agent a spoken task would record the video
+         * instead of the wearer, and Whisper would faithfully transcribe it.
+         * The voice pipeline's barge-in watcher would fare worse — it treats
+         * incoming sound as the wearer interrupting, so a video playing
+         * under a Gemini reply would cut that reply off again and again.
+         *
+         * Pause rather than mute: a muted video keeps running and the wearer
+         * loses whatever it said while they were talking. Pausing holds the
+         * place, which is what someone who just turned away to speak wants.
+         * Only what WE paused is resumed, so a video the wearer had already
+         * paused stays paused.
+         */
+        private val MEDIA_SUSPEND_JS = """
+            (function(){
+              var m = document.querySelectorAll('video,audio');
+              for (var i = 0; i < m.length; i++) {
+                if (!m[i].paused) { try { m[i].pause(); m[i].__x3Held = 1; } catch(e){} }
+              }
+            })();
+        """
+
+        private val MEDIA_RESUME_JS = """
+            (function(){
+              var m = document.querySelectorAll('video,audio');
+              for (var i = 0; i < m.length; i++) {
+                if (m[i].__x3Held) { m[i].__x3Held = 0; try { m[i].play(); } catch(e){} }
+              }
+            })();
+        """
+
         private val SITE_CHROME_FILTER_JS = """
             (function(){
               var STYLE_ID = 'x3hub-site-chrome-filter';

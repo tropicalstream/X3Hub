@@ -150,6 +150,15 @@ class MainActivity : AppCompatActivity() {
             showNotice("No Groq key for speech — triple-tap for settings.")
             return
         }
+        // Quiet the page BEFORE the mic opens, not after. Suspending once
+        // the recorder was already running left a few hundred ms to several
+        // seconds of video at the head of the clip — enough that Whisper
+        // came back with the video's own narration ("I'm going to show you
+        // the first one") instead of anything the wearer said. The recorder
+        // start is deliberately delayed to let the mic free up, and that
+        // delay is exactly the window this closes.
+        micArming = true
+        refreshPageMediaHold()
         geminiWasLiveBeforeTask =
             HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE
         if (geminiWasLiveBeforeTask) exitGeminiFully()
@@ -163,7 +172,10 @@ class MainActivity : AppCompatActivity() {
         micPrivilegeHeld = true
         // The mic does not free instantly after the session lets go.
         uiHandler.postDelayed({
-            if (!agentRecorder.start()) {
+            val started = agentRecorder.start()
+            micArming = false
+            refreshPageMediaHold()
+            if (!started) {
                 showNotice("Microphone unavailable.")
                 releaseMicPrivilege()
                 return@postDelayed
@@ -194,9 +206,13 @@ class MainActivity : AppCompatActivity() {
     private fun finishAgentTask() {
         uiHandler.removeCallbacks(autoStopAgentTask)
         releaseMicPrivilege()
+        // Defensive: a task ended before the recorder ever opened would
+        // otherwise leave the arming flag set and every window silent.
+        micArming = false
         val window = agentTaskWindow
         agentTaskWindow = null
         val audio = agentRecorder.stop()
+        refreshPageMediaHold()
         if (audio == null || window == null) {
             showNotice("Didn't catch that.")
             return
@@ -676,16 +692,24 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) exitGeminiFully()
+        // Dictating into a form field is the third way the mic opens, and a
+        // video does not know to be quiet for it either.
+        micArming = true
+        refreshPageMediaHold()
         uiHandler.postDelayed({
             if (agentRecorder.start()) {
                 showNotice("Dictating — press the mic again when done.")
                 uiHandler.postDelayed({ finishFieldDictation(window) }, AgentVoice.MAX_RECORD_MS)
             } else showNotice("Microphone unavailable.")
+            micArming = false
+            refreshPageMediaHold()
         }, 300L)
     }
 
     private fun finishFieldDictation(window: BrowserWindowView) {
-        val audio = agentRecorder.stop() ?: run { showNotice("Didn't catch that."); return }
+        val audio = agentRecorder.stop()
+        refreshPageMediaHold()
+        if (audio == null) { showNotice("Didn't catch that."); return }
         AgentVoice.transcribe(applicationContext, audio) { text, error ->
             if (text == null) showNotice(error ?: "Didn't catch that.")
             else { window.insertText(text); resetKeyboardHideTimer() }
@@ -944,8 +968,23 @@ class MainActivity : AppCompatActivity() {
                     return
                 }
                 intent?.getStringExtra("js")?.let { js ->
-                    hudPinBoardController?.browserWindows()?.firstOrNull()
-                        ?.debugEval(js)
+                    // `-e on youtube` picks the window by host substring.
+                    // Without it this always hit window ONE, so probing a
+                    // page meant first arranging for it to be the only
+                    // window open — and half of what is worth probing (a
+                    // video's real mute state) is only interesting when
+                    // there are other windows around to interfere.
+                    val on = intent.getStringExtra("on")?.lowercase()
+                    val windows = hudPinBoardController?.browserWindows().orEmpty()
+                    val target = if (on.isNullOrBlank()) windows.firstOrNull()
+                    else windows.firstOrNull {
+                        it.currentUrl.orEmpty().lowercase().contains(on)
+                    }
+                    if (target == null) {
+                        Log.w(TAG, "DEBUG js: no window matching '${on ?: "<first>"}'")
+                        return
+                    }
+                    target.debugEval(js)
                     return
                 }
                 val url = intent?.getStringExtra("url")
@@ -1223,6 +1262,50 @@ class MainActivity : AppCompatActivity() {
             uiHandler.removeCallbacks(hideChatCardRunnable)
         }
         lastVoicePhase = phase
+        refreshPageMediaHold()
+    }
+
+    /** Whether page media is currently held paused for the microphone. */
+    private var pageMediaSuspended = false
+
+    /**
+     * The mic has been asked for but is not open yet. Held only across the
+     * gap between deciding to record and the recorder actually starting,
+     * and cleared on both outcomes so it cannot strand the hold.
+     */
+    private var micArming = false
+
+    /**
+     * Pause page media whenever the microphone is open, and let it go when
+     * it closes.
+     *
+     * A session means an open mic for its whole length, and the speakers sit
+     * on the same temples. Now that a video can actually make noise, it is
+     * noise the assistant hears: the barge-in watcher reads incoming sound
+     * as the wearer interrupting, so a video left running under a reply
+     * would chop that reply to pieces. A spoken page-agent task is worse
+     * still — Whisper would transcribe the video instead of the wearer.
+     *
+     * DERIVED from the two things that open a mic rather than counted with
+     * acquire/release pairs. The paths overlap in ugly ways — starting an
+     * agent task tears down a live session, so a release for the session
+     * and an acquire for the recorder race each other — and one unbalanced
+     * pair in that tangle would strand every window paused with no way back.
+     * Recomputing the answer cannot drift.
+     *
+     * Applies to every window, not just the selected one: which window the
+     * wearer has SELECTED has nothing to do with which one is making a
+     * sound, and the microphone hears the room.
+     */
+    private fun refreshPageMediaHold() {
+        val want = lastVoicePhase != HudStateBridge.VoicePhase.IDLE ||
+            agentRecorder.isRecording ||
+            micArming
+        if (want == pageMediaSuspended) return
+        pageMediaSuspended = want
+        hudPinBoardController?.browserWindows()?.forEach {
+            runCatching { it.setMediaSuspended(want) }
+        }
     }
 
     private fun renderAiBadge(state: HudStateBridge.State) {

@@ -207,8 +207,39 @@ object HudPinStore {
             cache?.let { return it }
             val loaded = load()
             cache = loaded
+            // The first read off disk IS the previous session's board. Note
+            // those ids once, before anything this session can add to them.
+            // Flagged rather than inferred from the set being empty: a board
+            // that starts with no pins is a real state, and inferring from
+            // emptiness would then mark the FIRST pin the wearer opens as a
+            // restored one and leave their video muted.
+            if (!restoredCaptured) {
+                restoredCaptured = true
+                loaded.forEach { restoredIds.add(it.id) }
+            }
             return loaded
         }
+    }
+
+    private val restoredIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    @Volatile private var restoredCaptured = false
+
+    /**
+     * True when this pin was on the board before the app started, rather
+     * than created during this session.
+     *
+     * Exists so a restored browser window can come back SILENT. A video
+     * window never produces a usable snapshot — the capture is uniform and
+     * gets rejected as blank — so it takes the plain reload path on every
+     * cold start and begins playing at once. That was harmless while
+     * YouTube muted itself; now that it does not, putting the glasses on
+     * and opening the hub would start yesterday's video out loud, which
+     * nobody asked for. Opening a video is a request for sound; finding one
+     * where you left it is not.
+     */
+    fun wasRestoredFromDisk(id: String): Boolean {
+        all()   // ensure the first load has happened and the set is populated
+        return restoredIds.contains(id)
     }
 
     /**

@@ -386,6 +386,10 @@ class HudPinBoardController(
                 // sending them back to the original URL loses that.
                 val resumeUrl = pin.lastUrl?.takeIf { it.isNotBlank() }
                     ?: pin.payload.takeIf { it.isNotBlank() }
+                // A window coming back from last session starts silent —
+                // see HudPinStore.wasRestoredFromDisk. Clicking it gives it
+                // its voice back.
+                w.autoplayWithSound = !HudPinStore.wasRestoredFromDisk(pin.id)
                 val snap = pin.snapshotPath?.takeIf { java.io.File(it).exists() }
                 when {
                     resumeUrl == null -> Unit
