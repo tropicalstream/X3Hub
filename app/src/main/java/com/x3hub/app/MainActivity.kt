@@ -547,9 +547,18 @@ class MainActivity : AppCompatActivity() {
                 result != null && result.contains("opened") && !retried ->
                     uiHandler.postDelayed({ searchInPage(query, window, retried = true) }, 500L)
                 else -> {
-                    // No search box here — a web search beats doing nothing.
-                    window.loadUrl(PageCommands.searchUrl(query, google = false))
-                    showNotice("Searching the web for ${query.take(32)}")
+                    // No usable box on this page. If the site has a search of
+                    // its own, use THAT — being dropped on DuckDuckGo while
+                    // standing on YouTube is never what was asked for. Only
+                    // fall out to the web when the site offers nothing.
+                    val onSite = PageCommands.siteSearchUrlForHost(window.currentUrl, query)
+                    if (onSite != null) {
+                        window.loadUrl(onSite)
+                        showNotice("Searching this site for ${query.take(32)}")
+                    } else {
+                        window.loadUrl(PageCommands.searchUrl(query, google = false))
+                        showNotice("Searching the web for ${query.take(32)}")
+                    }
                     releasePageCommandToCursor(window)
                 }
             }

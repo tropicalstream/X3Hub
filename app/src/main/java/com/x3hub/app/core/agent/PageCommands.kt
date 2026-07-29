@@ -127,6 +127,24 @@ object PageCommands {
             return Outcome.Handled("🔎 $q")
         }
 
+        // "search <q> on <site>" — naming a SITE means search that site, not
+        // the web and not whatever box this page happens to have. Runs after
+        // the engine rule (duckduckgo/google mean the open web) and before
+        // the generic one, which would otherwise swallow "on youtube" into
+        // the query and then fall back to DuckDuckGo when the current page
+        // had no search box.
+        Regex(
+            "^search (?:for )?(.+?)\\s+(?:on|in|using|with|via|at)\\s+(?:the\\s+)?(.+?)$"
+        ).find(text)?.let { m ->
+            val q = m.groupValues[1]
+            val site = m.groupValues[2]
+            siteSearchUrl(site, q)?.let { url ->
+                Log.d(TAG, "route=siteSearch site='$site' q='$q'")
+                window.loadUrl(url)
+                return Outcome.Handled("🔎 $q on $site")
+            }
+        }
+
         Regex("^search (?:for )?(.+)$").find(text)?.let { m ->
             val q = m.groupValues[1]
             // "search for Mozart and play the first recording" is a TASK: the
@@ -259,6 +277,75 @@ object PageCommands {
 
     /** Same home the assistant's browser tool uses. */
     private const val HOME_URL = "https://duckduckgo.com/"
+
+    /**
+     * Sites that own their own search, keyed by what a wearer calls them.
+     *
+     * "Search cats on YouTube" used to reach neither YouTube nor the site's
+     * search box: only duckduckgo and google were recognised after "on", so
+     * the site name stayed glued to the query ("cats on youtube") and was
+     * typed into whatever field the page happened to have — and when there
+     * was none, the fallback dropped the wearer on DuckDuckGo. Naming a site
+     * is a request to search THAT SITE.
+     *
+     * A results URL rather than driving the page's own box: it works from
+     * any page, needs no field-scoring heuristic, and survives the
+     * single-page apps (YouTube above all) whose search box is the least
+     * scriptable thing on them.
+     *
+     * Whisper hears these as two words about as often as one, so every
+     * pattern tolerates internal spaces.
+     */
+    private val SITE_SEARCHES: List<Pair<Regex, String>> = listOf(
+        Regex("^(?:the\\s+)?you\\s*tube(?:\\.com)?$", RegexOption.IGNORE_CASE)
+            to "https://m.youtube.com/results?search_query=",
+        Regex("^(?:the\\s+)?wiki\\s*p[ae]dia(?:\\.org)?$", RegexOption.IGNORE_CASE)
+            to "https://en.m.wikipedia.org/w/index.php?search=",
+        Regex("^(?:the\\s+)?(?:internet\\s+)?archive(?:\\.org)?$", RegexOption.IGNORE_CASE)
+            to "https://archive.org/search?query=",
+        Regex("^(?:the\\s+)?reddit(?:\\.com)?$", RegexOption.IGNORE_CASE)
+            to "https://www.reddit.com/search/?q=",
+        Regex("^(?:the\\s+)?git\\s*hub(?:\\.com)?$", RegexOption.IGNORE_CASE)
+            to "https://github.com/search?q=",
+        Regex("^(?:the\\s+)?amazon(?:\\.com)?$", RegexOption.IGNORE_CASE)
+            to "https://www.amazon.com/s?k=",
+        Regex("^(?:the\\s+)?e\\s*bay(?:\\.com)?$", RegexOption.IGNORE_CASE)
+            to "https://www.ebay.com/sch/i.html?_nkw="
+    )
+
+    /**
+     * The search URL for the site a window is ALREADY on, or null.
+     *
+     * Used when an in-page search finds no usable box: dropping the wearer
+     * on DuckDuckGo while they are standing on YouTube is never what they
+     * asked for. Matched on the host so m./www./mobile. prefixes all count.
+     */
+    fun siteSearchUrlForHost(currentUrl: String?, query: String): String? {
+        val host = runCatching { java.net.URL(currentUrl ?: return null).host }
+            .getOrNull()?.lowercase() ?: return null
+        // "m.youtube.com" and "en.wikipedia.org" both have to reduce to the
+        // name a person uses. Taking the FIRST label gives "m" and "en";
+        // dropping the TLD and taking the LAST remaining one gives "youtube"
+        // and "wikipedia", which is what the table is keyed by.
+        val labels = host.split('.').filter { it.isNotBlank() }
+        val stem = when {
+            labels.size >= 2 -> labels[labels.size - 2]
+            labels.size == 1 -> labels[0]
+            else -> return null
+        }
+        val template = SITE_SEARCHES.firstOrNull {
+            it.first.matches(stem) || it.first.matches(host)
+        }?.second ?: return null
+        return template + URLEncoder.encode(query.trim(), "UTF-8")
+    }
+
+    /** The search URL for a site the wearer named, or null if unknown. */
+    fun siteSearchUrl(site: String, query: String): String? {
+        val name = site.trim().trim('"', '\'').trim()
+        val template = SITE_SEARCHES.firstOrNull { it.first.matches(name) }?.second
+            ?: return null
+        return template + URLEncoder.encode(query.trim(), "UTF-8")
+    }
 
     fun searchUrl(query: String, google: Boolean): String {
         val q = URLEncoder.encode(query.trim(), "UTF-8")
