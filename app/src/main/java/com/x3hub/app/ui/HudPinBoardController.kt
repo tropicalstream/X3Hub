@@ -995,14 +995,131 @@ class HudPinBoardController(
         val w = container.width.takeIf { it > 0 } ?: container.layoutParams.width
         val h = container.height.takeIf { it > 0 } ?: container.layoutParams.height
         val lp = container.layoutParams as FrameLayout.LayoutParams
-        lp.leftMargin = (screenX - boardLoc[0] - w / 2f).toInt()
-        lp.topMargin = (screenY - boardLoc[1] - h / 2f).toInt()
-        clampToZone(lp, w, h, lastZone ?: computeZone())
+        val zone = lastZone ?: computeZone()
+        // The SAME resolve the ghost just showed. Committing from the raw
+        // cursor instead would put the pin somewhere the wearer had been
+        // shown it would not go, which is worse than having no snapping.
+        val (sx, sy) = resolveSnap(
+            (screenX - boardLoc[0] - w / 2f).toInt(),
+            (screenY - boardLoc[1] - h / 2f).toInt(),
+            w, h, id, zone
+        )
+        lp.leftMargin = sx
+        lp.topMargin = sy
+        clampToZone(lp, w, h, zone)
         container.layoutParams = lp
         exitModifyMode()
         // persists + re-renders through the store observer
         HudPinStore.updatePosition(id, lp.leftMargin, lp.topMargin)
         return true
+    }
+
+    // ── Magnetic tiling ──────────────────────────────────────────────
+
+    /** The snapped edge chosen on each axis last frame, for hysteresis. */
+    private var snappedX: Int? = null
+    private var snappedY: Int? = null
+
+    /** Whether the last resolve actually locked onto something. */
+    private var snapEngaged = false
+
+    /**
+     * Pull a dragged pin onto a neighbouring window's edge, if it is close.
+     *
+     * Snapping to OTHER WINDOWS rather than to a fixed lattice is the whole
+     * point: a lattice quantises everywhere, so every position becomes
+     * somebody else's idea of correct and open space stops being free. Edge
+     * snapping only pulls where tiling is actually meaningful, which is what
+     * lets "drop it roughly there" and "tile it exactly" be the same gesture.
+     *
+     * The candidates per axis are the four that matter — butt against the
+     * neighbour's far side, butt against its near side, or align with either
+     * of its edges — plus the zone's own edges. Because the size ladder has
+     * fixed rungs, two same-rung windows butted together are perfectly
+     * tiled by construction; nothing here has to know that.
+     *
+     * There is no stickiness to escape from. Both the ghost and the commit
+     * resolve from the CURRENT cursor position every time, so nothing
+     * accumulates: move a few px past the threshold and the pull is simply
+     * gone next frame. That is the failure this avoids — a snap that tracks
+     * its own output drifts behind the finger and reads as the app fighting
+     * you.
+     *
+     * Only browser windows are magnets. Bookmarks and live cards are 66x96
+     * and there are a lot of them; letting every one contribute four
+     * candidates per axis turns a ten-pin board into a field of competing
+     * targets a few px apart.
+     */
+    private fun resolveSnap(
+        rawX: Int,
+        rawY: Int,
+        w: Int,
+        h: Int,
+        movingId: String?,
+        zone: Zone
+    ): Pair<Int, Int> {
+        val gap = dp(6)
+        val threshold = dp(SNAP_DP)
+        val xs = ArrayList<Int>(16)
+        val ys = ArrayList<Int>(16)
+
+        for ((id, _) in browserWindows) {
+            if (id == movingId) continue
+            val v = pinViews[id] ?: continue
+            val lp = v.layoutParams as? FrameLayout.LayoutParams ?: continue
+            val ow = lp.width
+            val oh = lp.height
+            if (ow <= 0 || oh <= 0) continue
+            val l = lp.leftMargin
+            val t = lp.topMargin
+            xs += l + ow + gap      // sit to its right
+            xs += l - w - gap       // sit to its left
+            xs += l                 // left edges flush
+            xs += l + ow - w        // right edges flush
+            ys += t + oh + gap      // sit below it
+            ys += t - h - gap       // sit above it
+            ys += t                 // top edges flush
+            ys += t + oh - h        // bottom edges flush
+        }
+        // The zone's own edges, so a row can be squared off against the
+        // display rather than floating a few px inside it.
+        xs += zone.left
+        xs += zone.right - w
+        ys += zone.top
+        ys += zone.bottom - h
+
+        snappedX = nearest(rawX, xs, threshold, snappedX)
+        snappedY = nearest(rawY, ys, threshold, snappedY)
+        snapEngaged = snappedX != null || snappedY != null
+        return (snappedX ?: rawX) to (snappedY ?: rawY)
+    }
+
+    /**
+     * Nearest candidate within [threshold], preferring the one already held.
+     *
+     * The preference is hysteresis, and it is not optional: with several
+     * windows on the board two candidates land within a few px of each other
+     * often, and without it the ghost flickers between them while the hand
+     * is holding still.
+     */
+    private fun nearest(v: Int, cands: List<Int>, threshold: Int, held: Int?): Int? {
+        var best: Int? = null
+        var bestD = threshold + 1
+        for (c in cands) {
+            val d = kotlin.math.abs(c - v)
+            if (d <= threshold && d < bestD) { best = c; bestD = d }
+        }
+        if (held != null && kotlin.math.abs(held - v) <= threshold) {
+            // Only give up a held edge for one that is clearly nearer.
+            if (best == null || bestD + dp(4) >= kotlin.math.abs(held - v)) return held
+        }
+        return best
+    }
+
+    private fun clearSnap() {
+        snappedX = null
+        snappedY = null
+        snapEngaged = false
     }
 
     // ── Move preview ─────────────────────────────────────────────────
@@ -1031,9 +1148,13 @@ class HudPinBoardController(
             ?: FrameLayout.LayoutParams(w, h)
         lp.width = w
         lp.height = h
-        lp.leftMargin = (screenX - boardLoc[0] - w / 2f).toInt()
-        lp.topMargin = (screenY - boardLoc[1] - h / 2f).toInt()
-        clampToZone(lp, w, h, lastZone ?: computeZone())
+        val zone = lastZone ?: computeZone()
+        val rawX = (screenX - boardLoc[0] - w / 2f).toInt()
+        val rawY = (screenY - boardLoc[1] - h / 2f).toInt()
+        val (sx, sy) = resolveSnap(rawX, rawY, w, h, id, zone)
+        lp.leftMargin = sx
+        lp.topMargin = sy
+        clampToZone(lp, w, h, zone)
 
         val view = movePreview ?: View(activity).also { v ->
             v.background = GradientDrawable().apply {
@@ -1050,10 +1171,25 @@ class HudPinBoardController(
             movePreview = v
         }
         view.layoutParams = lp
+        // Dashed while free, solid while locked onto a neighbour. The border
+        // is already the thing the wearer is watching, so it can answer
+        // "will this land where I think" without adding any new chrome —
+        // and on a 66px pin at arm's length, a state you have to infer from
+        // a few px of position change is a state you cannot see.
+        (view.background as? GradientDrawable)?.setStroke(
+            dp(if (snapEngaged) 2 else 1),
+            if (snapEngaged) 0xFF7FDBFF.toInt() else 0xFFFFB347.toInt(),
+            if (snapEngaged) 0f else 6f * density,
+            if (snapEngaged) 0f else 4f * density
+        )
         view.visibility = View.VISIBLE
     }
 
     private fun hideMovePreview() {
+        // Held edges belong to the drag that is ending; carrying them into
+        // the next one would snap the next pin to a magnet it was never
+        // near, from the first frame.
+        clearSnap()
         val v = movePreview ?: return
         movePreview = null
         runCatching { board.removeView(v) }
@@ -1091,6 +1227,14 @@ class HudPinBoardController(
 
     companion object {
         private const val CHIP_TAG = "hud_pin_chip"
+
+        /**
+         * How near an edge has to be, in dp, before the pin is pulled onto
+         * it. Wide enough to catch a cursor driven by a temple pad, which is
+         * a good deal shakier than a mouse; well short of the 40px tap slop,
+         * so aiming at a gap between two windows still lands in the gap.
+         */
+        private const val SNAP_DP = 14
 
         // Content-sized notes/live cards retain their former widths as caps.
         private const val NOTE_MAX_WIDTH_DP = 100
