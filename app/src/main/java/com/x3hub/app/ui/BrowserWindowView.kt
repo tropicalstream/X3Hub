@@ -782,6 +782,32 @@ class BrowserWindowView @JvmOverloads constructor(
                 onPageStartedListener?.invoke(url)
             }
 
+            /**
+             * The secure attempt failed — go back to the address as given.
+             *
+             * MAIN FRAME ONLY. A missing tracker or a broken image on an
+             * otherwise fine HTTPS page also arrives here, and reloading the
+             * whole document as cleartext because one asset 404'd would
+             * downgrade a working secure page for no reason.
+             */
+            override fun onReceivedError(
+                view: WebView?,
+                request: android.webkit.WebResourceRequest?,
+                error: android.webkit.WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame != true) return
+                val fallback = cleartextFallbackUrl ?: return
+                val failed = request.url?.toString().orEmpty()
+                // Only when it is OUR upgrade that failed, not some later
+                // navigation the wearer made from the page.
+                val upgraded = "https://" + fallback.substring("http://".length)
+                if (!failed.equals(upgraded, ignoreCase = true)) return
+                cleartextFallbackUrl = null
+                Log.i(TAG, "https failed (${error?.description}) — falling back to $fallback")
+                view?.loadUrl(fallback)
+            }
+
             override fun onScaleChanged(view: WebView?, oldScale: Float, newScale: Float) {
                 super.onScaleChanged(view, oldScale, newScale)
                 currentScale = newScale
@@ -1169,10 +1195,31 @@ class BrowserWindowView @JvmOverloads constructor(
      * passed through untouched — turning a failed load into a search is
      * the caller's policy, not this window's.
      */
+    /**
+     * The http:// address this window is currently trying as https://, so a
+     * failure can fall back to the address the wearer actually gave.
+     */
+    private var cleartextFallbackUrl: String? = null
+
     fun loadUrl(url: String) {
         val trimmed = url.trim()
         if (trimmed.isEmpty()) return
         val full = if (trimmed.contains("://")) trimmed else "https://$trimmed"
+        // Try HTTPS even when told http://. The assistant writes URLs from
+        // memory and often writes the old one — asked for kvhs.com it opened
+        // http://www.kvhs.com/, which Android refuses outright, so the wearer
+        // got "cleartext not permitted" for a site that serves HTTPS
+        // perfectly well. Upgrading first means the secure version is used
+        // whenever it exists, and the fallback below covers the sites where
+        // it genuinely does not.
+        if (full.startsWith("http://", ignoreCase = true)) {
+            cleartextFallbackUrl = full
+            val secure = "https://" + full.substring("http://".length)
+            Log.i(TAG, "upgrading to https: $secure")
+            webView.loadUrl(secure)
+            return
+        }
+        cleartextFallbackUrl = null
         webView.loadUrl(full)
     }
 

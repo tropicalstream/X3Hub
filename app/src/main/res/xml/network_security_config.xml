@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Plain HTTP is permitted because this app is a BROWSER.
+
+  Android blocks cleartext by default from targetSdk 28, and for an app that
+  only talks to its own backend that default is right. This one loads
+  whatever page the wearer names, and a real slice of the web — small radio
+  stations, community sites, old municipal pages — is still served over HTTP
+  and nothing else. Blocked, those windows show "cleartext not permitted",
+  which reads as the app being broken rather than the site being old.
+
+  It is not a licence to be careless. BrowserWindowView.loadUrl UPGRADES
+  http:// to https:// and only falls back to cleartext when the secure
+  attempt actually fails, so a site that can be reached securely always is.
+  The app's own API traffic (Gemini, Groq, Cerebras) is hardcoded https://
+  and never takes this path.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
