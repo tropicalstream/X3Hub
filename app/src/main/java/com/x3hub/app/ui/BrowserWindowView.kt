@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.util.Log
 import android.view.Gravity
@@ -90,6 +91,30 @@ class BrowserWindowView @JvmOverloads constructor(
         private set
 
     var isModifying: Boolean = false
+        private set
+
+    /**
+     * When the wearer last chose this window — opened it, clicked it, or
+     * moved it. NOT the same question as [isActive], and separating the two
+     * is the point.
+     *
+     * [isActive] answers "which window receives swipes and taps", so it is
+     * exclusive and it is dropped deliberately: entering MODIFY clears it so
+     * a resize gesture does not scroll the article, and leaving MODIFY lands
+     * in INERT rather than ACTIVE. Both are right for input.
+     *
+     * But the voice tools were asking [isActive] a different question —
+     * "which page does the wearer MEAN" — and with two windows open and
+     * neither active they got null and answered "you have no page open" to a
+     * wearer looking straight at one. Every window draws a border (INERT is
+     * a faint white stroke, ACTIVE cyan), so from the glass the window still
+     * looks picked; only the code disagreed.
+     *
+     * Recency answers the second question and survives the first: a window
+     * you just positioned is still the one you mean, even though it
+     * correctly stopped taking your swipes.
+     */
+    var lastFocusMs: Long = SystemClock.uptimeMillis()
         private set
 
     val state: WindowState
@@ -1020,6 +1045,10 @@ class BrowserWindowView @JvmOverloads constructor(
 
     /** One single click on the window. Idempotent. */
     fun activate() {
+        // Before the early return below: re-clicking the window you are
+        // already in is still you saying "this one", and it is exactly how a
+        // wearer re-picks a window after talking to Gemini.
+        lastFocusMs = SystemClock.uptimeMillis()
         // Even if already active — a wearer clicking a still expects it to
         // come alive, and an early return would leave a dead picture.
         wakeFromSnapshot()
@@ -1058,6 +1087,10 @@ class BrowserWindowView @JvmOverloads constructor(
         if (isModifying == on) return
         isModifying = on
         if (on) {
+            // Moving or resizing a window is the loudest possible statement
+            // that it is the one you care about, even though it is about to
+            // stop being the one that takes your swipes.
+            lastFocusMs = SystemClock.uptimeMillis()
             isActive = false
             setEdgeScrollVelocity(0f, 0f)
         }

@@ -305,18 +305,37 @@ class MainActivity : AppCompatActivity() {
      * path; otherwise return the touchpad directly to the hub cursor.
      */
     /**
-     * The window the wearer picked, or null with a spoken reason.
+     * The window the wearer means when they say "this page", or null only
+     * when there genuinely is not one.
      *
-     * Same rule everywhere: the SELECTED window (cyan border), or the only
-     * one if nothing is selected. Since a tap away no longer releases a
-     * window, "the bordered one" is a stable answer for as long as the
-     * border shows — which is what makes "summarise this" work after the
-     * wearer has looked away to talk.
+     * Preference order, and each step exists because the one above it can
+     * legitimately be absent:
+     *
+     *  1. The SELECTED window (cyan border). Unambiguous — the wearer is
+     *     driving it right now.
+     *  2. The only window, selected or not. Nothing to confuse it with.
+     *  3. The one the wearer most recently opened, clicked, or moved.
+     *
+     * Step 3 is the one that was missing, and it cost a real failure: "pin
+     * this page" answered "you don't have a web page open" to a wearer
+     * looking at two. Nothing-selected is not an exotic state — measured on
+     * device, every window RESTORED at startup comes back INERT, so the
+     * board sits there with three windows and no selection until the wearer
+     * happens to click one. Leaving MODIFY lands in INERT too. Selection is
+     * about which window takes your swipes; it was never meant to be the
+     * whole answer to which page you are talking about, and treating its
+     * absence as "no page" turned the ordinary resting state of a restored
+     * board into a dead end for every voice tool at once.
+     *
+     * Guessing here is safe in the way that matters: every tool that uses
+     * this NAMES the page it acted on in its spoken reply, so a wrong guess
+     * is immediately audible rather than silent.
      */
     private fun pickedWindow(): BrowserWindowView? {
-        val c = hudPinBoardController ?: return null
-        return c.browserWindows().firstOrNull { it.isActive }
-            ?: c.browserWindows().singleOrNull()
+        val all = hudPinBoardController?.browserWindows().orEmpty()
+        return all.firstOrNull { it.isActive }
+            ?: all.singleOrNull()
+            ?: all.maxByOrNull { it.lastFocusMs }
     }
 
     /**
@@ -495,9 +514,10 @@ class MainActivity : AppCompatActivity() {
      * "this page" precisely because they can see it.
      */
     private fun bookmarkVisiblePage(reply: (BookmarkBridge.Saved) -> Unit) {
-        val c = hudPinBoardController
-        val window = c?.browserWindows()?.firstOrNull { it.isActive }
-            ?: c?.browserWindows()?.singleOrNull()
+        // The same resolver every other "this page" tool uses, rather than a
+        // second copy of the rule: bookmarking disagreeing with the page
+        // agent about which window is meant would be its own bug.
+        val window = pickedWindow()
             ?: return reply(BookmarkBridge.Saved(false, error = "There is no page open to save."))
         // A window restored from a still has no document: no title, and a
         // capture would photograph the still rather than the page. Wake it

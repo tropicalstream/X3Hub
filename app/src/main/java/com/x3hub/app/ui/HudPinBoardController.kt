@@ -432,12 +432,20 @@ class HudPinBoardController(
                     lp.leftMargin + (lp.width) <= z.right &&
                     lp.topMargin + (lp.height) <= z.bottom
             } else false
+            // Selection state, because "which window does the app think is
+            // picked" is invisible from outside and was the whole answer to
+            // "Gemini says no page is open" while three were on the board.
+            // Every window draws a border, so a screenshot cannot tell you
+            // this and neither could this dump until now.
+            val w = browserWindows[pin.id]
+            val sel = w?.let { " state=${it.state} focusAge=${
+                android.os.SystemClock.uptimeMillis() - it.lastFocusMs}ms" }.orEmpty()
             android.util.Log.i(
                 "X3HubBoard",
                 "  ${pin.type.padEnd(9)} '${pin.label.take(18)}' " +
                     "box=${lp?.width}x${lp?.height} at=${lp?.leftMargin},${lp?.topMargin} " +
                     "measured=${v?.width}x${v?.height} laidOut=${v?.isLaidOut} " +
-                    "attached=${v?.parent != null} fitsInZone=$inZone"
+                    "attached=${v?.parent != null} fitsInZone=$inZone$sel"
             )
         }
     }, 1500L)
