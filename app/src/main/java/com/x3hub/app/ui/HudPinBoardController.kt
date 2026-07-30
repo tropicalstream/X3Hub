@@ -247,7 +247,7 @@ class HudPinBoardController(
 
         val zone = computeZone()
         lastZone = zone
-        val gap = dp(6)
+        val gap = dp(GAP_DP)
         var x = zone.left
         var y = zone.top
         var rowH = 0
@@ -282,6 +282,7 @@ class HudPinBoardController(
                 // custom pin the candidate cell would overlap, and hard-
                 // clamp the result inside the zone.
                 var guard = 0
+                var found = false
                 while (guard++ < 64) {
                     if (x + w > zone.right && x > zone.left) {
                         x = zone.left
@@ -297,11 +298,41 @@ class HudPinBoardController(
                         x = blocker[2] + gap
                         continue
                     }
+                    found = true
                     break
                 }
                 lp.leftMargin = x
                 lp.topMargin = y
                 clampToZone(lp, w, h, zone)
+                // Running out of room used to mean landing wherever the
+                // search gave up — which is how a news card ended up drawn
+                // straight over a browser window on a ten-pin board. The
+                // clamp can do it too, by pulling a pin back inside the zone
+                // and into something. Either way, go BELOW everything
+                // instead: off the bottom is recoverable by moving a pin,
+                // on top of a window hides content with no clue why.
+                if (!found || collidesWithCustom(lp, w, h, customRects, gap)) {
+                    // Try below everything — but only KEEP it if it is
+                    // actually better. On a board already at capacity the
+                    // clamp drags that fallback straight back up into the
+                    // window row, and blind faith in it put a browser window
+                    // on top of another one. When nothing fits, the honest
+                    // move is the position that hides the least.
+                    val keepX = lp.leftMargin
+                    val keepY = lp.topMargin
+                    val before = overlapArea(keepX, keepY, w, h, customRects)
+                    lp.leftMargin = zone.left
+                    lp.topMargin = (customRects.maxOfOrNull { it[3] } ?: zone.top) + gap
+                    clampToZone(lp, w, h, zone)
+                    val after = overlapArea(lp.leftMargin, lp.topMargin, w, h, customRects)
+                    if (after >= before) {
+                        lp.leftMargin = keepX
+                        lp.topMargin = keepY
+                    }
+                    x = lp.leftMargin
+                    y = lp.topMargin
+                    rowH = 0
+                }
                 x = lp.leftMargin + w + gap
                 y = lp.topMargin
                 rowH = maxOf(rowH, h)
@@ -1016,6 +1047,29 @@ class HudPinBoardController(
 
     // ── Magnetic tiling ──────────────────────────────────────────────
 
+    /** Total px this rect would cover of any hand-placed pin. */
+    private fun overlapArea(l: Int, t: Int, w: Int, h: Int, rects: List<IntArray>): Long {
+        var sum = 0L
+        for (r in rects) {
+            val ox = minOf(l + w, r[2]) - maxOf(l, r[0])
+            val oy = minOf(t + h, r[3]) - maxOf(t, r[1])
+            if (ox > 0 && oy > 0) sum += ox.toLong() * oy
+        }
+        return sum
+    }
+
+    /** Does this rect land within [gap] of any hand-placed pin? */
+    private fun collidesWithCustom(
+        lp: FrameLayout.LayoutParams,
+        w: Int,
+        h: Int,
+        customRects: List<IntArray>,
+        gap: Int
+    ): Boolean = customRects.any { r ->
+        lp.leftMargin < r[2] + gap && lp.leftMargin + w + gap > r[0] &&
+            lp.topMargin < r[3] + gap && lp.topMargin + h + gap > r[1]
+    }
+
     /** The snapped edge chosen on each axis last frame, for hysteresis. */
     private var snappedX: Int? = null
     private var snappedY: Int? = null
@@ -1045,10 +1099,13 @@ class HudPinBoardController(
      * its own output drifts behind the finger and reads as the app fighting
      * you.
      *
-     * Only browser windows are magnets. Bookmarks and live cards are 66x96
-     * and there are a lot of them; letting every one contribute four
-     * candidates per axis turns a ten-pin board into a field of competing
-     * targets a few px apart.
+     * EVERY pin is a magnet, not just the windows. Restricting it to
+     * windows was the cautious first cut and it left the real raggedness
+     * untouched: three bookmarks that were plainly meant to be a row sat at
+     * y=143, 146 and 150, because nothing could pull them onto each other.
+     * The competing-targets worry that motivated the restriction is handled
+     * where it belongs — nearest-wins plus hysteresis — rather than by
+     * making most of the board unalignable.
      */
     private fun resolveSnap(
         rawX: Int,
@@ -1058,14 +1115,13 @@ class HudPinBoardController(
         movingId: String?,
         zone: Zone
     ): Pair<Int, Int> {
-        val gap = dp(6)
+        val gap = dp(GAP_DP)
         val threshold = dp(SNAP_DP)
-        val xs = ArrayList<Int>(16)
-        val ys = ArrayList<Int>(16)
+        val xs = ArrayList<Int>(48)
+        val ys = ArrayList<Int>(48)
 
-        for ((id, _) in browserWindows) {
+        for ((id, v) in pinViews) {
             if (id == movingId) continue
-            val v = pinViews[id] ?: continue
             val lp = v.layoutParams as? FrameLayout.LayoutParams ?: continue
             val ow = lp.width
             val oh = lp.height
@@ -1235,6 +1291,19 @@ class HudPinBoardController(
          * so aiming at a gap between two windows still lands in the gap.
          */
         private const val SNAP_DP = 14
+
+        /**
+         * Breathing room between any two pins, used by BOTH the flow grid
+         * and the magnets so a hand-placed pin sits on the same rhythm as an
+         * auto-placed one. At the old 6px, tiles read as one seam rather
+         * than as separate objects — a gap has to survive being looked at
+         * through a waveguide at arm's length, where a few px of dark
+         * between two dark panels is not a gap at all.
+         *
+         * Three windows at the 170px rung still fit a 628px zone with room
+         * to spare: 3*170 + 2*12 = 534.
+         */
+        private const val GAP_DP = 12
 
         // Content-sized notes/live cards retain their former widths as caps.
         private const val NOTE_MAX_WIDTH_DP = 100
