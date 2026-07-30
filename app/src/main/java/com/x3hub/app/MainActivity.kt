@@ -979,6 +979,14 @@ class MainActivity : AppCompatActivity() {
                     }
                     return
                 }
+                intent?.getStringExtra("scrollinfo")?.let { spec ->
+                    val dx = spec.trim().toIntOrNull() ?: 0
+                    val w = hudPinBoardController?.browserWindows()?.firstOrNull {
+                        it.currentUrl.orEmpty().contains("kvhs", true)
+                    } ?: hudPinBoardController?.browserWindows()?.firstOrNull()
+                    Log.i(TAG, "DEBUG scrollinfo: ${w?.debugScrollInfo(dx)}")
+                    return
+                }
                 intent?.getStringExtra("board")?.let {
                     hudPinBoardController?.debugDumpLayout()
                     return
@@ -1981,6 +1989,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateEdgeScroll() {
+        // Settings first: it covers the viewport, so while it is up there is
+        // no window underneath for the cursor to be over anyway.
+        if (updateSettingsEdgeScroll()) return
         val request = edgeScrollRequest()
         if (request == null) { stopEdgeScroll(); return }
         if (request.window !== edgeWindow) {
@@ -1994,6 +2005,51 @@ class MainActivity : AppCompatActivity() {
         edgeVx = request.vx
         edgeVy = request.vy
         if (edgeArmed) request.window.setEdgeScrollVelocity(request.vx, request.vy)
+    }
+
+    /** Pixels per tick while the cursor rests in the settings edge band. */
+    private var settingsScrollStep = 0
+    private val settingsScrollRunnable = object : Runnable {
+        override fun run() {
+            if (settingsScrollStep == 0) return
+            val moved = hubSettingsOverlay?.scrollMainBy(settingsScrollStep) == true
+            // Stop at the end rather than ticking forever against a wall.
+            if (!moved) { settingsScrollStep = 0; return }
+            uiHandler.postDelayed(this, SETTINGS_SCROLL_TICK_MS)
+        }
+    }
+
+    /**
+     * Scroll the settings page from the cursor's edge band.
+     *
+     * The panel grew past the display once there were a few bookmarks, and
+     * with no way to scroll it everything below the fold may as well not
+     * have existed — the wearer could read "Bookmarks (7)" and reach three
+     * of them. Returns true when settings owns the gesture, so the browser
+     * path below does not also run.
+     */
+    private fun updateSettingsEdgeScroll(): Boolean {
+        val overlay = hubSettingsOverlay
+        if (overlay?.isMainPageShowing() != true) {
+            if (settingsScrollStep != 0) {
+                settingsScrollStep = 0
+                uiHandler.removeCallbacks(settingsScrollRunnable)
+            }
+            return false
+        }
+        val pt = cursorInteractionPoint()
+        val h = findViewById<View>(android.R.id.content)?.height ?: 480
+        val vy = edgeVelocityFor(pt.second, h - pt.second)
+        val step = when {
+            vy > 0f -> SETTINGS_SCROLL_PX
+            vy < 0f -> -SETTINGS_SCROLL_PX
+            else -> 0
+        }
+        if (step == settingsScrollStep) return true
+        settingsScrollStep = step
+        uiHandler.removeCallbacks(settingsScrollRunnable)
+        if (step != 0) uiHandler.post(settingsScrollRunnable)
+        return true
     }
 
     private fun stopEdgeScroll() {
@@ -2747,6 +2803,10 @@ class MainActivity : AppCompatActivity() {
          * a margin rather than becoming the whole display.
          */
         private const val DOUBLE_TAP_AIM_SLOP_PX = 40f
+
+        /** Settings scroll: px per tick, and how often a tick lands. */
+        private const val SETTINGS_SCROLL_PX = 14
+        private const val SETTINGS_SCROLL_TICK_MS = 24L
 
         private const val LEFT_ARM_TAP_MOVE_TOLERANCE_PX = 60f
         // A right-pad touch that moves less than this (raw px) is a tap,

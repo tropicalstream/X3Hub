@@ -12,6 +12,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.core.bridge.HudPinStore
@@ -270,8 +271,45 @@ class HubSettingsOverlay(
         col.addView(buildGroundingRow())
         col.addView(buildAgentSttRow())
         col.addView(bookmarksBox())
-        return col
+
+        // The panel is taller than the 480px display once there are a few
+        // bookmarks, and without a scroller everything past the fold simply
+        // did not exist — the wearer could see "Bookmarks (7)" and reach
+        // three of them. Scrollbar off: it would cost readable width on a
+        // panel this narrow to say something the edge-scroll already tells
+        // you by moving.
+        val scroller = ScrollView(activity)
+        scroller.isFillViewport = true
+        scroller.isVerticalScrollBarEnabled = false
+        scroller.overScrollMode = View.OVER_SCROLL_NEVER
+        scroller.addView(
+            col,
+            FrameLayout.LayoutParams(MATCH, WRAP)
+        )
+        mainScroller = scroller
+        return scroller
     }
+
+    /** The scrollable body of the front page, for edge scrolling. */
+    private var mainScroller: ScrollView? = null
+
+    /**
+     * Scroll the settings body, and say whether it actually moved.
+     *
+     * The caller drives this from the cursor's edge band, and needs to know
+     * when it has hit the end so it can stop rather than grinding.
+     */
+    fun scrollMainBy(dy: Int): Boolean {
+        val s = mainScroller ?: return false
+        if (mainPage?.visibility != View.VISIBLE) return false
+        val before = s.scrollY
+        s.scrollBy(0, dy)
+        return s.scrollY != before
+    }
+
+    /** True while the front page (the one that scrolls) is up. */
+    fun isMainPageShowing(): Boolean =
+        isShowing && mainPage?.visibility == View.VISIBLE
 
     /**
      * The one non-key setting so far, and it earns its place: the glasses
