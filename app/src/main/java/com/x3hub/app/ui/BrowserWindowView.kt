@@ -833,6 +833,7 @@ class BrowserWindowView @JvmOverloads constructor(
     private fun injectImageFit() {
         runCatching { webView.evaluateJavascript(IMAGE_FIT_JS, null) }
         runCatching { webView.evaluateJavascript(VIEWPORT_FIT_JS, null) }
+        runCatching { webView.evaluateJavascript(CANVAS_FIX_JS, null) }
     }
 
     private fun injectInputHooks() {
@@ -1925,6 +1926,67 @@ class BrowserWindowView @JvmOverloads constructor(
 
               window.__x3ViewportFit = true;
               return first ? 'widened' : 'watching';
+            })();
+        """.trimIndent()
+
+        /**
+         * Give the page the white canvas it is assuming, when it declares
+         * none of its own.
+         *
+         * A site that sets no background on html or body inherits the
+         * browser's — white, everywhere on the web, which is why so many
+         * sites never bother stating it. This WebView's background is
+         * transparent, because on a waveguide black IS transparent and that
+         * is what makes a HUD window float. So those pages hand us dark text
+         * with nothing behind it and it lands on the black of the room.
+         *
+         * listennotes.com is the measured case: 3.9k of text in the DOM,
+         * every element correctly positioned, and NOTHING on the glass but
+         * three links — links being the only thing carrying its own colour.
+         * Turning dark mode off made it worse, not better, which is what
+         * ruled out force-dark as the cause: the links dimmed too. What was
+         * missing was never contrast, it was the canvas.
+         *
+         * Stating the white the page assumed puts force-dark back on solid
+         * ground — it darkens that canvas and lifts the text, exactly as it
+         * does for every site that declares its own background. Verified on
+         * device: the same window went from three links to a full masthead,
+         * search box and body copy, on a dark background.
+         */
+        private val CANVAS_FIX_JS = """
+            (function(){
+              if (window.__x3Canvas) return 'already';
+              function transparent(c){
+                return !c || c === 'transparent' || /rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(c);
+              }
+              function fix(){
+                try {
+                  var b = document.body;
+                  if (!b) return false;
+                  // BOTH, because the engine propagates body's background to
+                  // the canvas when html has none — a page that paints only
+                  // body is already fine and must not be touched.
+                  var hb = getComputedStyle(document.documentElement).backgroundColor;
+                  var bb = getComputedStyle(b).backgroundColor;
+                  if (!transparent(hb) || !transparent(bb)) return false;
+                  var s = document.getElementById('x3-canvas');
+                  if (!s) {
+                    s = document.createElement('style');
+                    s.id = 'x3-canvas';
+                    s.textContent = 'html{background-color:#ffffff !important}';
+                    (document.head || document.documentElement).appendChild(s);
+                  }
+                  return true;
+                } catch (e) { return false; }
+              }
+              fix();
+              // A single-page app can paint its background after first load,
+              // and can also throw ours away with a re-render; re-checking is
+              // cheap and fix() no-ops once anything opaque is in place.
+              setTimeout(fix, 600);
+              setTimeout(fix, 2000);
+              window.__x3Canvas = true;
+              return 'canvas checked';
             })();
         """.trimIndent()
 

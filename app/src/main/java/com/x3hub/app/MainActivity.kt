@@ -1081,6 +1081,24 @@ class MainActivity : AppCompatActivity() {
                     }
                     return
                 }
+                // `-e dark on|off -e on <host>`. forceDark is a paint-time
+                // transform, so it also rewrites any CSS a probe injects —
+                // which makes "is dark mode what broke this page" impossible
+                // to answer from JS alone. This is the only way to ask.
+                intent?.getStringExtra("dark")?.let { want ->
+                    val on = intent.getStringExtra("on")?.lowercase()
+                    val windows = hudPinBoardController?.browserWindows().orEmpty()
+                    val w = on?.let { h ->
+                        windows.firstOrNull { it.currentUrl.orEmpty().contains(h, true) }
+                    } ?: windows.firstOrNull { it.isActive } ?: windows.firstOrNull()
+                    if (w == null) {
+                        Log.w(TAG, "DEBUG dark: no window matching '${on ?: "<any>"}'")
+                    } else {
+                        w.darkMode = want.trim().equals("on", true)
+                        Log.i(TAG, "DEBUG dark=${w.darkMode} on ${w.currentUrl?.take(40)}")
+                    }
+                    return
+                }
                 intent?.getStringExtra("js")?.let { js ->
                     // `-e on youtube` picks the window by host substring.
                     // Without it this always hit window ONE, so probing a
