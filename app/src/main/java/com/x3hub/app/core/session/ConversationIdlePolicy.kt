@@ -19,10 +19,12 @@ internal class ConversationIdlePolicy(
         val idleForMs: Long,
         val timeoutMs: Long,
         val heardUser: Boolean,
-        val awaitingModelResponse: Boolean
+        val awaitingModelResponse: Boolean,
+        /** The pending turn has run out of rope regardless of recent noise. */
+        val pendingTurnExpired: Boolean = false
     ) {
         val shouldEnd: Boolean
-            get() = idleForMs >= timeoutMs
+            get() = pendingTurnExpired || idleForMs >= timeoutMs
 
         fun shouldFlushPendingAudio(afterMs: Long): Boolean =
             awaitingModelResponse &&
@@ -36,12 +38,28 @@ internal class ConversationIdlePolicy(
     private var priorHeardUser = false
     private var priorAwaiting = false
 
+    /**
+     * When the CURRENT pending turn was first heard, and when the audio for
+     * it was given up on. Both exist to stop a pending turn being immortal.
+     *
+     * The response timeout used to run from the last activity, and user
+     * activity refreshed it — so a room playing music transcribed a fragment
+     * every second or two, each one re-arming the full 20s window, and the
+     * session outlived any amount of silence from the actual wearer. A turn
+     * gets ONE window, measured from when it started; more noise inside it
+     * buys nothing.
+     */
+    private var awaitingSinceMs: Long = 0L
+    private var pendingAudioFlushedAtMs: Long = 0L
+
     @Synchronized
     fun reset(nowMs: Long) {
         lastActivityMs = nowMs
         heardUser = false
         awaitingModelResponse = false
         tentativeSpeech = false
+        awaitingSinceMs = 0L
+        pendingAudioFlushedAtMs = 0L
     }
 
     /** Real microphone speech, input transcription, or a debug voice turn. */
@@ -49,10 +67,36 @@ internal class ConversationIdlePolicy(
     fun onUserActivity(nowMs: Long) {
         lastActivityMs = maxOf(lastActivityMs, nowMs)
         heardUser = true
-        awaitingModelResponse = true
+        markAwaiting(nowMs)
         // Real evidence — whatever tentative state preceded it is confirmed
         // and a later fizzle must not roll this back.
         tentativeSpeech = false
+    }
+
+    /**
+     * Start the pending-turn clock, but only on the transition into waiting.
+     * Re-entering while already waiting must not move it, or the ambient-noise
+     * case simply moves from refreshing lastActivity to refreshing this.
+     */
+    private fun markAwaiting(nowMs: Long) {
+        if (!awaitingModelResponse) {
+            awaitingModelResponse = true
+            awaitingSinceMs = nowMs
+            pendingAudioFlushedAtMs = 0L
+        }
+    }
+
+    /**
+     * The pipeline gave up on the audio for the pending turn and closed the
+     * stream — the language stopped. If the model still produces nothing
+     * after that, there was no follow-up, whatever the microphone thought it
+     * heard, and the session should close on the SHORT clock rather than sit
+     * out the full response window.
+     */
+    @Synchronized
+    fun onPendingAudioFlushed(nowMs: Long) {
+        if (!awaitingModelResponse) return
+        if (pendingAudioFlushedAtMs == 0L) pendingAudioFlushedAtMs = nowMs
     }
 
     /**
@@ -75,7 +119,7 @@ internal class ConversationIdlePolicy(
             priorAwaiting = awaitingModelResponse
         }
         heardUser = true
-        awaitingModelResponse = true
+        markAwaiting(nowMs)
     }
 
     /**
@@ -93,6 +137,10 @@ internal class ConversationIdlePolicy(
         tentativeSpeech = false
         heardUser = priorHeardUser
         awaitingModelResponse = priorAwaiting
+        if (!awaitingModelResponse) {
+            awaitingSinceMs = 0L
+            pendingAudioFlushedAtMs = 0L
+        }
     }
 
     /** Text, audio, or a tool call produced for the pending user turn. */
@@ -102,6 +150,8 @@ internal class ConversationIdlePolicy(
         awaitingModelResponse = false
         // An answer arrived; the turn is settled either way.
         tentativeSpeech = false
+        awaitingSinceMs = 0L
+        pendingAudioFlushedAtMs = 0L
     }
 
     /** Tool work, playback drain, or another event that only refreshes idle. */
@@ -125,11 +175,42 @@ internal class ConversationIdlePolicy(
             awaitingModelResponse -> responseTimeoutMs
             else -> idleTimeoutMs
         }
+        // Two hard stops on a pending turn, because the ordinary idle clock
+        // cannot see through noise: it is refreshed by the very ambient sound
+        // that is holding the session open.
+        val expired = awaitingModelResponse && (
+            // PRIMARY: the language stopped — the pipeline gave up on the
+            // audio and closed the stream — and the model still said nothing.
+            // Then there was no follow-up, whatever the microphone thought it
+            // heard, and the turn dies on the short clock. This is the one
+            // that catches ambient music, because the measured pattern is a
+            // resume every second or two with a flush between each.
+            (pendingAudioFlushedAtMs > 0L &&
+                nowMs - pendingAudioFlushedAtMs >= idleTimeoutMs) ||
+                // BACKSTOP: input that never stops arriving and never gets
+                // flushed. The ordinary window is deliberately still
+                // refreshable, because a wearer dictating a long sentence
+                // emits transcription fragments the whole time and must not
+                // be cut off mid-word; this only bounds the pathological
+                // case where that never ends.
+                nowMs - awaitingSinceMs >= responseTimeoutMs * MAX_PENDING_WINDOWS
+            )
         return Snapshot(
             idleForMs = (nowMs - lastActivityMs).coerceAtLeast(0L),
             timeoutMs = timeout,
             heardUser = heardUser,
-            awaitingModelResponse = awaitingModelResponse
+            awaitingModelResponse = awaitingModelResponse,
+            pendingTurnExpired = expired
         )
+    }
+
+    private companion object {
+        /**
+         * How many response windows a single pending turn may span before it
+         * is declared runaway. Generous on purpose: this is a backstop for
+         * input that never stops and never flushes, not the mechanism that
+         * ends a normal turn.
+         */
+        const val MAX_PENDING_WINDOWS = 3
     }
 }

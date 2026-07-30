@@ -812,6 +812,13 @@ class GeminiVoicePipeline(context: Context) {
                         // transcription or model output clears the tentative
                         // mark before this can fire.
                         idlePolicy.onTentativeFizzled(now)
+                        // This is also the moment the LANGUAGE stopped: the
+                        // audio for the pending turn has been given up on and
+                        // the stream closed. If the model still says nothing,
+                        // there was no follow-up — whatever the mic thought
+                        // it heard — and the pending turn gets the short
+                        // clock instead of the full response window.
+                        idlePolicy.onPendingAudioFlushed(now)
                     }
                 }
                 if (idle.shouldEnd) {
