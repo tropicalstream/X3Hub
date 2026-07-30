@@ -1120,6 +1120,14 @@ class HudPinBoardController(
         val xs = ArrayList<Int>(48)
         val ys = ArrayList<Int>(48)
 
+        // A pin is only a magnet for the axis it is actually BESIDE you on.
+        // Without this the nearest edge in the whole board wins regardless of
+        // where it is: dragging a window into the row at y=248 snapped its
+        // left to 230, the right edge of a news card living at y=44..232 —
+        // two things that never touch. It read as the window landing
+        // somewhere arbitrary, and it pulled AWAY from the window it was
+        // being placed next to. Requiring overlap on the perpendicular axis
+        // is what makes the pull mean "put it beside that".
         for ((id, v) in pinViews) {
             if (id == movingId) continue
             val lp = v.layoutParams as? FrameLayout.LayoutParams ?: continue
@@ -1128,14 +1136,27 @@ class HudPinBoardController(
             if (ow <= 0 || oh <= 0) continue
             val l = lp.leftMargin
             val t = lp.topMargin
-            xs += l + ow + gap      // sit to its right
-            xs += l - w - gap       // sit to its left
-            xs += l                 // left edges flush
-            xs += l + ow - w        // right edges flush
-            ys += t + oh + gap      // sit below it
-            ys += t - h - gap       // sit above it
-            ys += t                 // top edges flush
-            ys += t + oh - h        // bottom edges flush
+            // STRICT overlap, no slack. Slack was the first attempt and it
+            // let a stacked pin count as a side-by-side one: a news card
+            // ending at y=232 was treated as beside a window starting at
+            // y=251, so the window kept snapping its left edge to the card's
+            // right edge — two objects that are above and below each other,
+            // not next to each other. If the spans do not actually cross,
+            // there is no shared row to tile into.
+            val besideVertically = rawY < t + oh && rawY + h > t
+            val besideHorizontally = rawX < l + ow && rawX + w > l
+            if (besideVertically) {
+                xs += l + ow + gap  // sit to its right
+                xs += l - w - gap   // sit to its left
+                xs += l             // left edges flush
+                xs += l + ow - w    // right edges flush
+            }
+            if (besideHorizontally) {
+                ys += t + oh + gap  // sit below it
+                ys += t - h - gap   // sit above it
+                ys += t             // top edges flush
+                ys += t + oh - h    // bottom edges flush
+            }
         }
         // The zone's own edges, so a row can be squared off against the
         // display rather than floating a few px inside it.
@@ -1289,8 +1310,14 @@ class HudPinBoardController(
          * it. Wide enough to catch a cursor driven by a temple pad, which is
          * a good deal shakier than a mouse; well short of the 40px tap slop,
          * so aiming at a gap between two windows still lands in the gap.
+         *
+         * Started at 14 and it was reported as "I'm not noticing it" — 14px
+         * on a shaky cursor means you have to already be placing the window
+         * correctly for the magnet to help, which is the one case where help
+         * is worth nothing. Safe to widen now that a magnet only pulls
+         * toward pins you are genuinely beside.
          */
-        private const val SNAP_DP = 14
+        private const val SNAP_DP = 26
 
         /**
          * Breathing room between any two pins, used by BOTH the flow grid
