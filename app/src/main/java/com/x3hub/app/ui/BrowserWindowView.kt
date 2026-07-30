@@ -226,11 +226,21 @@ class BrowserWindowView @JvmOverloads constructor(
     private var edgeScrollVx = 0f
     private var edgeScrollVy = 0f
 
+    /**
+     * The cached velocity above is a guess about what the PAGE is doing, and
+     * it is only worth deduping against while that guess still holds. Set
+     * whenever the two are known to have diverged — a new document, or the
+     * page telling us it stopped by itself — so the very next request is
+     * delivered whatever its value.
+     */
+    private var edgeScrollStale = true
+
     /** px/second; positive scrolls right/down. Both 0 stops. */
     fun setEdgeScrollVelocity(vx: Float, vy: Float) {
-        if (vx == edgeScrollVx && vy == edgeScrollVy) return
+        if (!edgeScrollStale && vx == edgeScrollVx && vy == edgeScrollVy) return
         edgeScrollVx = vx
         edgeScrollVy = vy
+        edgeScrollStale = false
         webView.evaluateJavascript(
             "window.__x3EdgeScroll && window.__x3EdgeScroll($vx,$vy);", null
         )
@@ -240,10 +250,17 @@ class BrowserWindowView @JvmOverloads constructor(
      * A new document has none of our JS state, so the velocity we believe we
      * sent is stale. Without this the first scroll after a navigation is
      * deduped away and the page sits still.
+     *
+     * The stale flag rather than a pair of zeroes, because zeroes are a real
+     * velocity: this runs on page START as well as finish, so a wearer parked
+     * in a band while a page loads left the host at (0,0) and the old document
+     * still animating, and the stop that should have caught it was deduped
+     * away for matching.
      */
     private fun resetEdgeScrollState() {
         edgeScrollVx = 0f
         edgeScrollVy = 0f
+        edgeScrollStale = true
     }
 
     // ── Resume-from-snapshot ─────────────────────────────────────────
@@ -498,6 +515,24 @@ class BrowserWindowView @JvmOverloads constructor(
         fun onInputBlur() {
             post { onPageInputBlur?.invoke() }
         }
+
+        /**
+         * The edge-scroll loop gave up on an axis — there is no box in the
+         * document that can move that way, or the one it chose refused to.
+         *
+         * Forgetting the cached velocity is the load-bearing half: the dedupe
+         * in [setEdgeScrollVelocity] assumes the page is still running what it
+         * was last sent, so once the page stops itself, the wearer nudging
+         * back to the same depth in the band produces the same quantised
+         * number and the request is dropped before it reaches the bridge.
+         */
+        @android.webkit.JavascriptInterface
+        fun onEdgeScrollIdle(horiz: Boolean) {
+            // Marking the state stale is what matters: it is what lets a
+            // wearer who nudges back into the band retry at the same speed
+            // instead of the dedupe swallowing the identical request.
+            post { edgeScrollStale = true }
+        }
     }
 
     private fun injectImageFit() {
@@ -521,6 +556,18 @@ class BrowserWindowView @JvmOverloads constructor(
     fun defocusField() = webView.evaluateJavascript("window.__x3Defocus && window.__x3Defocus()", null)
 
     /** Probe: run arbitrary JS in the page and log the result. */
+    /** Android-side scroll metrics — the view's own pan range, not the DOM's. */
+    fun debugScrollInfo(panDx: Int): String {
+        val before = webView.scrollX
+        if (panDx != 0) webView.scrollBy(panDx, 0)
+        return "viewScrollX $before -> ${webView.scrollX} " +
+            "canRight=${webView.canScrollHorizontally(1)} " +
+            "canLeft=${webView.canScrollHorizontally(-1)} " +
+            "canDown=${webView.canScrollVertically(1)} " +
+            "contentH=${webView.contentHeight} " +
+            "scale=$currentScale width=$width"
+    }
+
     fun debugEval(js: String) {
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
     }
@@ -1512,37 +1559,108 @@ class BrowserWindowView @JvmOverloads constructor(
             (function(){
               if (window.__x3EdgeScroll) return;
               var E = { vx:0, vy:0, raf:0, last:0, accX:0, accY:0,
-                        tx:null, ty:null, still:0, lastX:null, lastY:null };
+                        tx:null, ty:null, stillX:0, stillY:0,
+                        lastX:null, lastY:null, deadX:null, deadY:null };
+
+              // Where the page is sitting, as one comparable value, so
+              // "has anything changed under an axis we already found
+              // nothing on" costs a string compare instead of a DOM sweep.
+              function key(){ return (window.pageYOffset|0) + ',' + (window.pageXOffset|0); }
 
               // Per-axis, because the box that scrolls sideways is often not
               // the one that scrolls down — a wide table inside an article
               // is the usual case.
+              //
+              // NULL is a real answer here: "nothing on this axis can move".
+              // Returning `window` instead was the defect behind "web pages
+              // never edge scroll to the right". useWideViewPort makes the
+              // engine shrink the page until the whole content width fits the
+              // window, so the document's horizontal scroll range is zero on
+              // essentially every site — and handing the scroll to `window`
+              // anyway meant the loop spent 41 frames pushing a scroller that
+              // the line above had just PROVEN dead, cached it in E.tx for the
+              // rest of the park so the wearer could not get a second opinion
+              // after scrolling a wide table into view, and then stopped
+              // without telling the host or the wearer anything at all.
               function pick(horiz){
                 try {
-                  var best = null, bestArea = 0, all = document.querySelectorAll('*');
+                  // The document first, measured against innerWidth /
+                  // innerHeight — the VISUAL viewport in CSS px, i.e. what is
+                  // actually on screen at the current page scale.
+                  //
+                  // NOT documentElement.clientWidth. That is the initial
+                  // containing block (170 CSS px in a base window), so
+                  // scrollWidth > clientWidth reads TRUE on the root of almost
+                  // every page while the root cannot move a pixel: the engine
+                  // absorbed that overflow into zoom-out, not into scroll
+                  // range. Swapping clientWidth in here looks like a units fix
+                  // and would break the one case that works today — a 980px
+                  // desktop page, whose content really is wider than the
+                  // visual viewport and really does pan.
+                  var docCan = horiz
+                    ? (document.documentElement.scrollWidth > innerWidth + 4)
+                    : (document.documentElement.scrollHeight > innerHeight + 4);
+                  if (docCan) return window;
+
+                  // What the wearer can see, in client coordinates. Once the
+                  // page has been zoomed out to fit, the visual viewport is
+                  // WIDER than the containing block, so the larger of the two
+                  // is the honest bound.
+                  var vw = Math.max(innerWidth, document.documentElement.clientWidth);
+                  var vh = Math.max(innerHeight, document.documentElement.clientHeight);
+
+                  var best = null, bestScore = 0, all = document.querySelectorAll('*');
                   for (var i = 0; i < all.length && i < 4000; i++){
                     var e = all[i];
+                    // html and body ARE the document, which docCan just
+                    // answered, and their clientWidth is the containing block
+                    // rather than what is on screen — so they measure as
+                    // scrollable and then refuse to move. A site that puts
+                    // overflow-x:auto on body would otherwise win this sweep
+                    // outright and hand back a dead target through the branch
+                    // this function treats as success.
+                    if (e === document.documentElement || e === document.body) continue;
                     var s = getComputedStyle(e);
                     if (!/auto|scroll/.test(horiz ? s.overflowX : s.overflowY)) continue;
                     var can = horiz ? (e.scrollWidth > e.clientWidth + 4)
                                     : (e.scrollHeight > e.clientHeight + 4);
                     if (!can) continue;
-                    var r = e.getBoundingClientRect(), a = r.width * r.height;
-                    if (a > bestArea){ bestArea = a; best = e; }
+                    var r = e.getBoundingClientRect();
+                    // A scroller the wearer cannot see is the wrong answer
+                    // even when it is the biggest one in the document. The
+                    // sweep is document-wide, so a carousel in the footer of a
+                    // long article used to win and then scroll silently, off
+                    // screen — which is exactly what "sometimes sections
+                    // scroll" looks like from outside the window.
+                    var visW = Math.min(r.right, vw) - Math.max(r.left, 0);
+                    var visH = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+                    if (visW <= 0 || visH <= 0) continue;
+                    // Sideways scrollers are STRIPS, and a strip's height says
+                    // nothing about whether it is the thing the wearer means.
+                    // Scoring horizontal by area asked a 30px tab bar to be as
+                    // tall as an article pane: the old 0.10-of-viewport-area
+                    // gate works out at 0.10 * viewportHeight * (viewportWidth
+                    // / stripWidth) of required HEIGHT, so a full-bleed rail
+                    // needed 32 CSS px but an inset half-width one needed 65.
+                    // Width is the measurement that actually separates a
+                    // horizontal scroller from a decoration.
+                    if (horiz){
+                      if (visW > bestScore){ bestScore = visW; best = e; }
+                    } else {
+                      var a = visW * visH;
+                      if (a > bestScore){ bestScore = a; best = e; }
+                    }
                   }
-                  // Only trust an inner pane when the document itself cannot
-                  // scroll on that axis — same rule the agent's scroll uses.
-                  var docCan = horiz
-                    ? (document.documentElement.scrollWidth > innerWidth + 4)
-                    : (document.documentElement.scrollHeight > innerHeight + 4);
-                  // Sideways scrollers are shapes, not panes — a wide table or
-                  // a carousel is a strip that covers far less of the viewport
-                  // than a vertical content pane does. Holding horizontal to
-                  // the vertical threshold means never finding them.
-                  var minArea = horiz ? 0.10 : 0.40;
-                  if (best && bestArea > innerWidth * innerHeight * minArea && !docCan) return best;
-                } catch (err) {}
-                return window;
+                  if (!best) return null;
+                  // A sliver is not a scroller. Half the visible width is low
+                  // enough for a code block sitting inside an article's
+                  // padding and high enough to skip the little rails sites
+                  // hang in sidebars. Vertical keeps the area rule, where a
+                  // content pane genuinely is the biggest box on the page.
+                  if (horiz && bestScore < vw * 0.5) return null;
+                  if (!horiz && bestScore < vw * vh * 0.40) return null;
+                  return best;
+                } catch (err) { return null; }
               }
               function posOf(t, horiz){
                 if (!t) return 0;
@@ -1552,8 +1670,28 @@ class BrowserWindowView @JvmOverloads constructor(
                 return horiz ? t.scrollLeft : t.scrollTop;
               }
               function apply(t, dx, dy){
+                if (!t) return;
                 if (t === window) window.scrollBy(dx, dy);
                 else { if (dx) t.scrollLeft += dx; if (dy) t.scrollTop += dy; }
+              }
+              // Tell the host an axis has nothing to scroll. Two reasons, and
+              // both of them are why this bug survived so long.
+              //
+              // The host dedupes velocities so a cursor resting at one depth
+              // costs one bridge call and not one per motion event — but that
+              // assumes the page is still running what it was last sent. When
+              // the page stops on its own the two disagree, and the wearer
+              // nudging back to the same depth produces the same quantised
+              // number, which the dedupe then drops: the axis can never be
+              // restarted from the host side.
+              //
+              // And silence is the complaint itself. "It never scrolls right"
+              // and "there is nothing to the right" look identical from inside
+              // a 170px window.
+              function idle(horiz){
+                try {
+                  if (window.X3Input && X3Input.onEdgeScrollIdle) X3Input.onEdgeScrollIdle(!!horiz);
+                } catch (e) {}
               }
               function step(ts){
                 if (!E.vx && !E.vy){ E.raf = 0; return; }
@@ -1561,21 +1699,44 @@ class BrowserWindowView @JvmOverloads constructor(
                 var dt = ts - E.last; E.last = ts;
                 if (dt > 64) dt = 64;
                 if (dt < 0) dt = 0;
+                // The first frame after any restart has dt 0 by construction —
+                // E.last is seeded here, not when the velocity arrived — so it
+                // cannot move anything. Scoring it as "no progress" is what
+                // used to kill a retry on frame ONE, because the give-up
+                // counter survived from the previous attempt.
+                if (!dt){ E.raf = requestAnimationFrame(step); return; }
                 E.accX += E.vx * dt / 1000;
                 E.accY += E.vy * dt / 1000;
                 var wx = E.accX > 0 ? Math.floor(E.accX) : Math.ceil(E.accX);
                 var wy = E.accY > 0 ? Math.floor(E.accY) : Math.ceil(E.accY);
                 if (wx){ E.accX -= wx; apply(E.tx, wx, 0); }
                 if (wy){ E.accY -= wy; apply(E.ty, 0, wy); }
-                var px = posOf(E.tx, true), py = posOf(E.ty, false);
-                // Only an axis that is actually being driven counts as
-                // progress, or a purely vertical scroll would look stuck
-                // because x never changes.
-                var moved = (E.vx && (E.lastX === null || px !== E.lastX)) ||
-                            (E.vy && (E.lastY === null || py !== E.lastY));
-                if (!moved){ if (++E.still > 40){ E.vx = 0; E.vy = 0; E.raf = 0; return; } }
-                else E.still = 0;
-                E.lastX = px; E.lastY = py;
+                // Progress is per axis now. One shared counter plus an OR
+                // meant a corner gesture whose vertical half was working
+                // reported "moving" every frame, so a dead horizontal half
+                // never registered at all: the page scrolled down for as long
+                // as the wearer waited for it to go right.
+                if (E.vx){
+                  var px = posOf(E.tx, true);
+                  if (E.lastX !== null && px === E.lastX){
+                    if (++E.stillX > 40){
+                      E.vx = 0; E.accX = 0; E.tx = null; E.lastX = null;
+                      E.stillX = 0; E.deadX = key(); idle(true);
+                    }
+                  } else E.stillX = 0;
+                  E.lastX = px;
+                }
+                if (E.vy){
+                  var py = posOf(E.ty, false);
+                  if (E.lastY !== null && py === E.lastY){
+                    if (++E.stillY > 40){
+                      E.vy = 0; E.accY = 0; E.ty = null; E.lastY = null;
+                      E.stillY = 0; E.deadY = key(); idle(false);
+                    }
+                  } else E.stillY = 0;
+                  E.lastY = py;
+                }
+                if (!E.vx && !E.vy){ E.raf = 0; return; }
                 E.raf = requestAnimationFrame(step);
               }
               window.__x3EdgeScroll = function(vx, vy){
@@ -1584,13 +1745,35 @@ class BrowserWindowView @JvmOverloads constructor(
                 if (!E.vx && !E.vy){
                   if (E.raf) cancelAnimationFrame(E.raf);
                   E.raf = 0; E.tx = null; E.ty = null;
-                  E.accX = 0; E.accY = 0; E.lastX = null; E.lastY = null; E.still = 0;
+                  E.accX = 0; E.accY = 0; E.lastX = null; E.lastY = null;
+                  E.stillX = 0; E.stillY = 0; E.deadX = null; E.deadY = null;
                   return;
                 }
                 // Resolve each axis lazily: the DOM sweep is the expensive
                 // part and a vertical-only scroll must not pay for it twice.
-                if (E.vx && !E.tx){ E.tx = pick(true); E.lastX = null; E.still = 0; }
-                if (E.vy && !E.ty){ E.ty = pick(false); E.lastY = null; E.still = 0; }
+                //
+                // An axis that came back empty is remembered against the
+                // page's scroll position rather than latched. Latching was the
+                // old bug — nothing could restart it for the rest of the park
+                // — but re-running a 4000-element getComputedStyle sweep on
+                // every nudge inside a 22px band is not free either, and the
+                // way a wearer reaches something that CAN go sideways is by
+                // scrolling down to it.
+                if (E.vx && !E.tx){
+                  if (E.deadX === key()) E.vx = 0;
+                  else {
+                    E.tx = pick(true); E.lastX = null; E.stillX = 0;
+                    if (!E.tx){ E.vx = 0; E.deadX = key(); idle(true); }
+                  }
+                }
+                if (E.vy && !E.ty){
+                  if (E.deadY === key()) E.vy = 0;
+                  else {
+                    E.ty = pick(false); E.lastY = null; E.stillY = 0;
+                    if (!E.ty){ E.vy = 0; E.deadY = key(); idle(false); }
+                  }
+                }
+                if (!E.vx && !E.vy) return;
                 if (!E.raf){ E.last = 0; E.raf = requestAnimationFrame(step); }
               };
             })();
