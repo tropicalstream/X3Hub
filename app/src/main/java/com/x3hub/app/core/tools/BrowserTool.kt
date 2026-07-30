@@ -204,6 +204,14 @@ class BrowserTool(private val context: Context) : AiTapTool {
             .replace(Regex("\\s+dot\\s+"), ".")
             .replace(Regex("\\s+"), "")
         SPOKEN_SITES[joined]?.let { return it }
+        // The SUFFIX is a guess too, and a wrong one is invisible: asked for
+        // radio4all.net the model offered radioforall.org, which is
+        // well-formed, passes every check, and does not resolve at all —
+        // measured, it answers nothing. Having corrected the name, correct it
+        // whatever ending was attached.
+        if (joined.contains('.')) {
+            SPOKEN_SITES[joined.substringBeforeLast('.')]?.let { return it }
+        }
         // No spoken "dot" means this was never a dictated address; leave it
         // to the search path rather than guessing a host out of prose.
         if (!Regex("\\s+dot\\s+").containsMatchIn(lower)) return null

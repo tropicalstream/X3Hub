@@ -655,6 +655,17 @@ object PageCommands {
         // subject. Verified: /search/?q=jazz returns "jazz in podcasts".
         Regex("^(?:the\\s+)?listen\\s*notes(?:\\.com)?$", RegexOption.IGNORE_CASE)
             to "https://www.listennotes.com/search/?q="
+        // Podchaser was asked for and is deliberately ABSENT, because it does
+        // not work here at all — not by URL and not by typing. Measured in
+        // this WebView: /search/podcasts?q=jazz redirects to the front page;
+        // /search?q=jazz holds its address but renders the marketing site,
+        // and after thirty seconds the document still has ZERO input
+        // elements, three podcast links and a kilobyte of "Unlock Insights &
+        // Data". No bot challenge, no script error — their app simply never
+        // hydrates. With no search box there is nothing for the page agent to
+        // type into either, so an entry here could only ever have handed the
+        // wearer a brochure.
+        //
         // radio.garden is deliberately ABSENT. Its search looks like it takes
         // a query string and does not: opening /search?q=jazz was measured
         // landing on /search with the parameter dropped, an empty input and
