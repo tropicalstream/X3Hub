@@ -3,6 +3,7 @@ package com.x3hub.app.core.tools
 import android.content.Context
 import com.x3hub.app.core.bridge.BookmarkBridge
 import com.x3hub.app.core.bridge.BookmarkStore
+import com.x3hub.app.core.bridge.HudPinStore
 
 /**
  * bookmark_page — save the page the wearer is looking at, with a picture
@@ -21,6 +22,7 @@ class BookmarkTool(private val context: Context) : AiTapTool {
 
     override suspend fun execute(args: Map<String, String>): Result<String> {
         BookmarkStore.init(context)
+        HudPinStore.init(context)
         return when (arg(args, "action", "command").lowercase()) {
             "list", "show", "bookmarks" -> Result.success(list())
             "remove", "delete", "forget" -> Result.success(remove(arg(args, "title", "name", "query")))
@@ -41,19 +43,35 @@ class BookmarkTool(private val context: Context) : AiTapTool {
         return "Saved $title to your bookmarks and pinned it to the HUD."
     }
 
+    /**
+     * The pinned pages, same as the settings panel shows.
+     *
+     * Reading the bookmark store instead would let the spoken answer name
+     * pages the wearer cannot find on the board — a save that could not pin
+     * (full board) leaves a record with nothing on screen. Whatever is
+     * pinned is what they can point at, so that is the answer to "what have
+     * I saved".
+     */
     private fun list(): String {
-        val all = BookmarkStore.all()
-        if (all.isEmpty()) return "You have no bookmarks saved yet."
-        val names = all.take(8).joinToString(", ") { it.title }
+        val all = HudPinStore.all().filter { it.type == HudPinStore.TYPE_BOOKMARK }
+        if (all.isEmpty()) return "You have no pages pinned yet."
+        val names = all.take(8).joinToString(", ") { it.label }
         val more = if (all.size > 8) " and ${all.size - 8} more" else ""
-        return "You have ${all.size} bookmark${if (all.size == 1) "" else "s"}: $names$more."
+        return "You have ${all.size} page${if (all.size == 1) "" else "s"} pinned: $names$more."
     }
 
+    /** Unpin, and drop the saved record with it so no orphan is left. */
     private fun remove(query: String): String {
-        if (query.isBlank()) return "Which bookmark should I forget?"
-        val removed = BookmarkStore.removeByTitle(query)
-        return removed?.let { "Forgot the bookmark for $it." }
-            ?: "I could not find a bookmark matching $query."
+        if (query.isBlank()) return "Which pinned page should I forget?"
+        val pin = HudPinStore.all()
+            .filter { it.type == HudPinStore.TYPE_BOOKMARK }
+            .firstOrNull { it.label.contains(query, ignoreCase = true) }
+            ?: return "I could not find a pinned page matching $query."
+        HudPinStore.remove(pin.id)
+        pin.sourceUrl?.let { url ->
+            BookmarkStore.all().filter { it.url == url }.forEach { BookmarkStore.remove(it.id) }
+        }
+        return "Unpinned ${pin.label}."
     }
 
     /**

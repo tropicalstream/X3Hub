@@ -547,10 +547,17 @@ class HubSettingsOverlay(
 
         fun render() {
             box.removeAllViews()
-            val all = BookmarkStore.all()
+            // The HUD BOARD is the list, not the bookmark store. Those two
+            // drift apart the moment a save cannot pin — a full board leaves
+            // a record with nothing on screen — and the wearer then reads a
+            // settings list naming pages they cannot see anywhere. What is
+            // pinned is the thing they can point at, so it is the thing this
+            // enumerates, and removing a row here takes the pin down.
+            HudPinStore.init(activity)
+            val all = HudPinStore.all().filter { it.type == HudPinStore.TYPE_BOOKMARK }
             box.addView(
                 label(
-                    if (all.isEmpty()) "Bookmarks" else "Bookmarks (${all.size})",
+                    if (all.isEmpty()) "Pinned pages" else "Pinned pages (${all.size})",
                     16f, ACCENT, bold = true
                 )
             )
@@ -558,7 +565,7 @@ class HubSettingsOverlay(
                 box.addView(
                     label(
                         "Open a page, activate it with one click, then say " +
-                            "\"pin this page\" — it is saved here with a thumbnail.",
+                            "\"pin this page\" — it appears on the HUD and here.",
                         14f, DIM
                     ).apply {
                         layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
@@ -567,12 +574,11 @@ class HubSettingsOverlay(
                 )
                 return
             }
-            all.take(BOOKMARK_ROWS).forEach { bm -> box.addView(bookmarkRow(bm) { render() }) }
+            all.take(BOOKMARK_ROWS).forEach { pin -> box.addView(bookmarkRow(pin) { render() }) }
             if (all.size > BOOKMARK_ROWS) {
                 box.addView(
                     label(
-                        "+${all.size - BOOKMARK_ROWS} more — ask to list them, " +
-                            "or say \"forget\" a title.",
+                        "+${all.size - BOOKMARK_ROWS} more — scroll the board to see them.",
                         13f, DIM
                     ).apply {
                         layoutParams = LinearLayout.LayoutParams(MATCH, WRAP)
@@ -585,7 +591,7 @@ class HubSettingsOverlay(
         return box
     }
 
-    private fun bookmarkRow(bm: BookmarkStore.Bookmark, onChanged: () -> Unit): View {
+    private fun bookmarkRow(pin: HudPinStore.HudPin, onChanged: () -> Unit): View {
         val row = LinearLayout(activity)
         row.orientation = LinearLayout.HORIZONTAL
         row.layoutParams = LinearLayout.LayoutParams(MATCH, TAP_MIN).apply { topMargin = 4 }
@@ -595,10 +601,10 @@ class HubSettingsOverlay(
         // Without this the row is an inert surface: the tap is swallowed and
         // nothing happens, which reads on the glasses as a dead control.
         row.isClickable = true
-        row.setOnClickListener { openBookmark(bm) }
+        row.setOnClickListener { openBookmark(pin) }
 
         row.addView(
-            label(bm.title, 15f, Color.WHITE).apply {
+            label(pin.label, 15f, Color.WHITE).apply {
                 layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
@@ -606,30 +612,40 @@ class HubSettingsOverlay(
         )
         // Nested clickables win over the row only where the cursor is over
         // them — the hit-test returns the deepest interactive descendant.
-        row.addView(button("Open", 72) { openBookmark(bm) })
+        row.addView(button("Open", 72) { openBookmark(pin) })
         row.addView(
             button("✕", TAP_MIN) {
-                BookmarkStore.remove(bm.id)
-                // The HUD pin for this page, if it is on the board, points at
-                // the thumbnail file just deleted — take it down with it.
                 HudPinStore.init(activity)
-                HudPinStore.all()
-                    .filter { it.type == HudPinStore.TYPE_BOOKMARK && it.sourceUrl == bm.url }
-                    .forEach { HudPinStore.remove(it.id) }
-                showToast("Removed ${bm.title}")
+                HudPinStore.remove(pin.id)
+                // Take the saved record down with the pin, so the thumbnail
+                // file goes too. Leaving it behind would recreate exactly the
+                // invisible-record state this list exists to stop.
+                pin.sourceUrl?.let { url ->
+                    BookmarkStore.init(activity)
+                    BookmarkStore.all()
+                        .filter { it.url == url }
+                        .forEach { BookmarkStore.remove(it.id) }
+                }
+                showToast("Unpinned ${pin.label}")
                 onChanged()
             }
         )
         return row
     }
 
-    private fun openBookmark(bm: BookmarkStore.Bookmark) {
+    private fun openBookmark(pin: HudPinStore.HudPin) {
+        // A bookmark pin's payload is its thumbnail file; the page it stands
+        // for is sourceUrl. Opening the payload would try to browse a JPEG.
+        val url = pin.sourceUrl?.takeIf { it.isNotBlank() } ?: run {
+            showToast("That pin has no page address saved")
+            return
+        }
         HudPinStore.init(activity)
         val opened = HudPinStore.add(
             HudPinStore.HudPin(
                 type = BrowserTool.TYPE_BROWSER,
-                label = bm.title,
-                payload = bm.url
+                label = pin.label,
+                payload = url
             )
         )
         if (!opened) {
