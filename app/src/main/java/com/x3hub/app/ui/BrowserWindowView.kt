@@ -832,6 +832,7 @@ class BrowserWindowView @JvmOverloads constructor(
 
     private fun injectImageFit() {
         runCatching { webView.evaluateJavascript(IMAGE_FIT_JS, null) }
+        runCatching { webView.evaluateJavascript(VIEWPORT_FIT_JS, null) }
     }
 
     private fun injectInputHooks() {
@@ -1817,6 +1818,44 @@ class BrowserWindowView @JvmOverloads constructor(
          * Scoped to documents that are ONLY an image — an article's photos
          * must keep the layout the page gave them.
          */
+        /**
+         * Give a page a phone-width layout when it has pinned itself to the
+         * WINDOW's width instead.
+         *
+         * A viewport meta that sets a scale but no width — wikipedia.org
+         * ships `initial-scale=1, user-scalable=yes` — makes the layout
+         * viewport equal the visual one. On a phone that is ~390px and the
+         * page is fine. Here it is 170px, narrower than any device the site
+         * was ever drawn for, and because the scale is pinned at 1 nothing
+         * shrinks to compensate: measured on wikipedia.org, innerWidth 170 at
+         * scale 1.00, versus archive.org's 339 at 0.53 and the Bach page's
+         * 680 at 0.53. Those two look right precisely BECAUSE they lay out
+         * wide and are then scaled down.
+         *
+         * So this only rewrites the meta when a page both pins a scale and
+         * omits a width — the exact shape that collapses. A page with
+         * width=device-width is left alone, and so is a page with no meta at
+         * all, since useWideViewPort already gives that one a wide layout.
+         * That narrowness matters: forcing a width on EVERY page is what made
+         * text come out scrunched when it was tried globally before.
+         */
+        private val VIEWPORT_FIT_JS = """
+            (function(){
+              try {
+                var m = document.querySelector('meta[name=viewport]');
+                if (!m) return 'no-meta';
+                var c = (m.getAttribute('content') || '').toLowerCase();
+                if (c.indexOf('width') !== -1) return 'has-width';
+                if (c.indexOf('scale') === -1) return 'no-scale';
+                if (window.innerWidth >= $MOBILE_LAYOUT_CSS_WIDTH) return 'wide-enough';
+                m.setAttribute('content',
+                  'width=$MOBILE_LAYOUT_CSS_WIDTH, initial-scale=' +
+                  (window.innerWidth / $MOBILE_LAYOUT_CSS_WIDTH));
+                return 'widened';
+              } catch (e) { return 'err ' + e; }
+            })();
+        """.trimIndent()
+
         private val IMAGE_FIT_JS = """
             (function(){
               function isImageDocument(){
