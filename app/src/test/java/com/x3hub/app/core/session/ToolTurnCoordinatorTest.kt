@@ -65,6 +65,39 @@ class ToolTurnCoordinatorTest {
     }
 
     @Test
+    fun rewordedRepeatAfterAConfirmatoryToolIsSuppressed() {
+        // The real failure, from the glasses: the model announced the whole
+        // outcome BEFORE calling open_browser, then said it again afterwards
+        // in different words. Word overlap is too low for isNearDuplicate to
+        // catch, so the wearer heard the same news twice.
+        val coordinator = coordinator()
+
+        coordinator.shouldDeliverTranscript(
+            "A Wikipedia window is now open and you can click to activate it."
+        )
+        coordinator.onToolCall("open-1")
+        coordinator.onToolResult("open-1", succeeded = true, resultIsInformational = false)
+        assertFalse(coordinator.shouldDeliverTranscript("A window for wikipedia.org is open."))
+
+        val completion = coordinator.onTurnComplete()
+        assertTrue(completion.wasRemainderBuffered)
+        assertTrue(completion.suppressAsDuplicate)
+        assertFalse(completion.deliverBufferedRemainder)
+    }
+
+    @Test
+    fun confirmatoryToolStillExplainsItsOwnFailure() {
+        val coordinator = coordinator()
+
+        coordinator.shouldDeliverTranscript("Opening that page for you now.")
+        coordinator.onToolCall("open-2")
+        coordinator.onToolResult("open-2", succeeded = false, resultIsInformational = false)
+        assertTrue(coordinator.shouldDeliverTranscript("The board is full, so nothing opened."))
+
+        assertFalse(coordinator.onTurnComplete().wasRemainderBuffered)
+    }
+
+    @Test
     fun distinctPostToolExplanationIsReplayed() {
         val coordinator = coordinator()
 

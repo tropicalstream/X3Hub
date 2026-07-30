@@ -50,6 +50,8 @@ internal class ToolTurnCoordinator(
     private val bufferedTokens = ArrayList<String>()
     private val bufferedTranscript = StringBuilder()
     private var bufferRemainder = false
+    /** The buffered remainder follows a tool that only confirmed. */
+    private var confirmatoryResult = false
 
     /**
      * Register a transcription fragment and say whether it should reach the
@@ -108,9 +110,21 @@ internal class ToolTurnCoordinator(
      * remain live even when Gemini spoke before trying the action.
      */
     @Synchronized
-    fun onToolResult(callId: String, succeeded: Boolean) {
+    @JvmOverloads
+    fun onToolResult(
+        callId: String,
+        succeeded: Boolean,
+        /**
+         * Whether the tool's result carries information the model could not
+         * already have said. A read or a lookup does; opening a window does
+         * not — its result is a confirmation of the very thing the model has
+         * just announced.
+         */
+        resultIsInformational: Boolean = true
+    ) {
         if (succeeded && hasSubstantialDeliveredOutput()) {
             bufferRemainder = true
+            confirmatoryResult = !resultIsInformational
         }
     }
 
@@ -124,7 +138,21 @@ internal class ToolTurnCoordinator(
     fun onTurnComplete(): TurnCompletion {
         val wasBuffered = bufferRemainder
         val postToolText = bufferedTranscript.toString()
-        val duplicate = wasBuffered && isNearDuplicate(deliveredTokens, bufferedTokens)
+        // A CONFIRMATORY tool has nothing to add. When the model has already
+        // spoken a substantial sentence and the tool only confirms it, the
+        // remainder is the same news twice however it is worded — and word
+        // comparison is exactly what fails here. Measured on the glasses:
+        // "A Wikipedia window is now open and you can click to activate it"
+        // before the call, "A window for wikipedia.org…" after it. Different
+        // enough to pass isNearDuplicate, identical in meaning, and the
+        // wearer heard both.
+        //
+        // Informational results still get the word comparison, because there
+        // the remainder usually IS the answer: "Let me check the live data
+        // source" followed by "connected, refreshing every fifteen minutes"
+        // must reach the wearer.
+        val duplicate = wasBuffered &&
+            (confirmatoryResult || isNearDuplicate(deliveredTokens, bufferedTokens))
         val completion = TurnCompletion(
             wasRemainderBuffered = wasBuffered,
             suppressAsDuplicate = duplicate,
@@ -157,6 +185,7 @@ internal class ToolTurnCoordinator(
         bufferedTokens.clear()
         bufferedTranscript.setLength(0)
         bufferRemainder = false
+        confirmatoryResult = false
     }
 
     private fun trimRememberedCallIds() {

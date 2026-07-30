@@ -330,6 +330,24 @@ class GeminiVoicePipeline(context: Context) {
         activeSessionEpoch += 1L
     }
 
+    /**
+     * Whether a tool's result tells the model something it did not already
+     * know, or merely confirms what it just said it would do.
+     *
+     * This decides whether a second sentence after the tool is an ANSWER or
+     * a repeat. read_page comes back with the page's text; open_browser comes
+     * back with "Opened a browser window on wikipedia.org" — which is the
+     * sentence the model had already spoken before calling it. Listing the
+     * informational ones rather than the confirmatory ones is deliberate: a
+     * tool added later is far more likely to act than to report, and the
+     * safer default for an unknown tool is to let it speak.
+     */
+    private fun toolResultIsInformational(name: String): Boolean = when (name) {
+        "open_browser", "window_control", "hud_pin", "bookmark_page",
+        "camera_action", "reminder", "custom_command" -> false
+        else -> true
+    }
+
     private fun isSessionEpochCurrent(epoch: Long): Boolean =
         activeSessionEpoch == epoch
 
@@ -703,7 +721,11 @@ class GeminiVoicePipeline(context: Context) {
                 if (!isSessionEpochCurrent(epoch)) return@launch
                 // Arm buffering before the response is sent; the next model
                 // audio can arrive immediately after sendToolResponse.
-                toolTurnCoordinator.onToolResult(callId, resultSucceeded)
+                toolTurnCoordinator.onToolResult(
+                    callId,
+                    resultSucceeded,
+                    resultIsInformational = toolResultIsInformational(toolName)
+                )
                 val ok = runCatching {
                     liveSession?.sendToolResponse(callId, toolName, resultText) == true
                 }.getOrDefault(false)
