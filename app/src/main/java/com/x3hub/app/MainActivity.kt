@@ -1001,10 +1001,16 @@ class MainActivity : AppCompatActivity() {
                 }
                 intent?.getStringExtra("scrollinfo")?.let { spec ->
                     val dx = spec.trim().toIntOrNull() ?: 0
-                    val w = hudPinBoardController?.browserWindows()?.firstOrNull {
-                        it.currentUrl.orEmpty().contains("kvhs", true)
-                    } ?: hudPinBoardController?.browserWindows()?.firstOrNull()
-                    Log.i(TAG, "DEBUG scrollinfo: ${w?.debugScrollInfo(dx)}")
+                    // `-e on <host>` like the js hook below. This used to
+                    // hardcode the one host it was written for, which made it
+                    // silently probe the WRONG window on any other page —
+                    // the worst failure mode for a measurement tool.
+                    val on = intent.getStringExtra("on")?.lowercase()
+                    val windows = hudPinBoardController?.browserWindows().orEmpty()
+                    val w = on?.let { h ->
+                        windows.firstOrNull { it.currentUrl.orEmpty().contains(h, true) }
+                    } ?: windows.firstOrNull { it.isActive } ?: windows.firstOrNull()
+                    Log.i(TAG, "DEBUG scrollinfo[${w?.currentUrl?.take(40)}]: ${w?.debugScrollInfo(dx)}")
                     return
                 }
                 intent?.getStringExtra("board")?.let {
@@ -1058,6 +1064,20 @@ class MainActivity : AppCompatActivity() {
                     // only proves the mechanics underneath it.
                     bookmarkVisiblePage { r ->
                         Log.i(TAG, "DEBUG bookmark ok=${r.ok} title=${r.title} err=${r.error}")
+                    }
+                    return
+                }
+                // The save hook above can only ever ADD, which makes testing
+                // it a one-way door: every run leaves a pin behind, and after
+                // a few the board hits MAX_PINS and later saves stop pinning
+                // for a reason that has nothing to do with what is under test.
+                intent?.getStringExtra("unbookmark")?.let { q ->
+                    BookmarkStore.init(this@MainActivity)
+                    if (q.trim().equals("list", true)) {
+                        Log.i(TAG, "DEBUG bookmarks: " +
+                            BookmarkStore.all().joinToString(" | ") { it.title })
+                    } else {
+                        Log.i(TAG, "DEBUG unbookmark '$q' -> ${BookmarkStore.removeByTitle(q)}")
                     }
                     return
                 }
