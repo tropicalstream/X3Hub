@@ -1822,37 +1822,109 @@ class BrowserWindowView @JvmOverloads constructor(
          * Give a page a phone-width layout when it has pinned itself to the
          * WINDOW's width instead.
          *
-         * A viewport meta that sets a scale but no width — wikipedia.org
-         * ships `initial-scale=1, user-scalable=yes` — makes the layout
-         * viewport equal the visual one. On a phone that is ~390px and the
-         * page is fine. Here it is 170px, narrower than any device the site
-         * was ever drawn for, and because the scale is pinned at 1 nothing
-         * shrinks to compensate: measured on wikipedia.org, innerWidth 170 at
-         * scale 1.00, versus archive.org's 339 at 0.53 and the Bach page's
-         * 680 at 0.53. Those two look right precisely BECAUSE they lay out
-         * wide and are then scaled down.
+         * A page whose layout viewport ends up as narrow as the WINDOW has
+         * nowhere to put a design drawn for a phone, and if its scale is
+         * pinned nothing shrinks to compensate. Measured in a 170px window:
          *
-         * So this only rewrites the meta when a page both pins a scale and
-         * omits a width — the exact shape that collapses. A page with
-         * width=device-width is left alone, and so is a page with no meta at
-         * all, since useWideViewPort already gives that one a wide layout.
-         * That narrowness matters: forcing a width on EVERY page is what made
-         * text come out scrunched when it was tried globally before.
+         *   wikipedia.org  innerWidth 170  scale 1.00  initial-scale=1, no width
+         *   duckduckgo.com innerWidth 170  scale 1.00  width=device-width, initial-scale=1
+         *   archive.org    innerWidth 339  scale 0.53
+         *   kunstderfuge   innerWidth 680  scale 0.53
+         *
+         * The two that look right lay out WIDE and are then scaled down. The
+         * two that do not are pinned at 1:1 against a viewport narrower than
+         * any phone ever made.
+         *
+         * The test is the measured width, deliberately, not the wording of
+         * the meta. An earlier version keyed on "declares a scale but omits a
+         * width", which described wikipedia exactly and therefore missed
+         * duckduckgo — same collapse, reached by saying width=device-width on
+         * a device whose "width" is 170px. Asking what the layout viewport
+         * actually came out as catches both, and any third spelling of the
+         * same problem.
+         *
+         * Only pages that came out NARROWER than a phone are touched. The
+         * ones already laying out wide are left exactly alone — forcing a
+         * width on every page is what made text come out scrunched when a
+         * global width was tried before.
          */
         private val VIEWPORT_FIT_JS = """
             (function(){
+              if (window.__x3ViewportFit) return 'already';
+              var target = $MOBILE_LAYOUT_CSS_WIDTH;
+
+              var owned = false;
+
+              function apply(){
+                try {
+                  // Act when the page has collapsed narrower than a phone —
+                  // or whenever we already own the meta, because the window
+                  // itself resizes on this device and the scale we wrote is
+                  // only right for the size it was written at. Growing a
+                  // window 170 -> 238 left the page still painting into 170px
+                  // of it, since "wide enough" was true and nothing
+                  // recomputed.
+                  if (window.innerWidth >= target && !owned) return false;
+                  var vv = window.visualViewport;
+                  // Device px across the window. Invariant under our own
+                  // rescaling — width shrinks exactly as scale grows — which
+                  // is what lets this be recomputed safely on every resize.
+                  var deviceW = vv ? vv.width * vv.scale : window.innerWidth;
+                  if (!(deviceW > 0)) return false;
+                  var want = 'width=' + target +
+                    ', initial-scale=' + (deviceW / target);
+                  var m = document.querySelector('meta[name=viewport]');
+                  if (!m) {
+                    m = document.createElement('meta');
+                    m.setAttribute('name', 'viewport');
+                    (document.head || document.documentElement).appendChild(m);
+                  }
+                  // Writing only on a real change is the loop guard: the
+                  // resize our own write provokes recomputes the same string
+                  // and stops here.
+                  if (m.getAttribute('content') === want) return false;
+                  m.setAttribute('content', want);
+                  owned = true;
+                  return true;
+                } catch (e) { return false; }
+              }
+
+              var first = apply();
+
+              // Watch for the COLLAPSE, not just for the meta changing.
+              //
+              // On duckduckgo.com the one-shot rewrite did nothing while the
+              // page still ended up 170px wide, and the reason was timing,
+              // not the page fighting back: writing the meta by hand sticks
+              // permanently, so nothing reverts it. At injection time the
+              // layout viewport was still wide, so apply() correctly decided
+              // there was nothing to fix — and the narrowing that followed,
+              // when the page's own meta took effect, changed no attribute
+              // for a mutation observer to see.
+              //
+              // A resize IS that narrowing. Re-checking there catches the
+              // case whenever it happens, instead of hoping a fixed delay
+              // lands after it. apply() no-ops once the layout is wide
+              // enough, and applying makes it wide enough, so the resize this
+              // causes settles on the next call rather than oscillating.
               try {
-                var m = document.querySelector('meta[name=viewport]');
-                if (!m) return 'no-meta';
-                var c = (m.getAttribute('content') || '').toLowerCase();
-                if (c.indexOf('width') !== -1) return 'has-width';
-                if (c.indexOf('scale') === -1) return 'no-scale';
-                if (window.innerWidth >= $MOBILE_LAYOUT_CSS_WIDTH) return 'wide-enough';
-                m.setAttribute('content',
-                  'width=$MOBILE_LAYOUT_CSS_WIDTH, initial-scale=' +
-                  (window.innerWidth / $MOBILE_LAYOUT_CSS_WIDTH));
-                return 'widened';
-              } catch (e) { return 'err ' + e; }
+                window.addEventListener('resize', apply);
+                if (window.visualViewport) {
+                  window.visualViewport.addEventListener('resize', apply);
+                }
+                var head = document.head || document.documentElement;
+                if (head && window.MutationObserver) {
+                  new MutationObserver(function(){ apply(); }).observe(head, {
+                    childList: true, subtree: true, attributes: true,
+                    attributeFilter: ['content', 'name']
+                  });
+                }
+                setTimeout(apply, 400);
+                setTimeout(apply, 1500);
+              } catch (e) {}
+
+              window.__x3ViewportFit = true;
+              return first ? 'widened' : 'watching';
             })();
         """.trimIndent()
 
