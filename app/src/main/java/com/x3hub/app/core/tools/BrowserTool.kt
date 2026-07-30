@@ -3,6 +3,7 @@ package com.x3hub.app.core.tools
 import android.content.Context
 import android.net.Uri
 import com.x3hub.app.core.agent.PageCommands
+import com.x3hub.app.core.web.LocalPages
 import com.x3hub.app.core.bridge.HudPinStore
 import java.net.URLEncoder
 import java.util.Locale
@@ -63,17 +64,35 @@ class BrowserTool(private val context: Context) : AiTapTool {
                         "Give a normal web address, or pass 'query' to search instead."
                 )
             )
-            query.isNotBlank() -> searchUrl(query)
+            // A query that is really a site's NAME opens the site. "Open
+            // radio for all" reaches this tool as a query, because with no
+            // "dot" in it the model has nothing to call a URL — and a web
+            // search ABOUT radio4all.net is never what naming it meant.
+            query.isNotBlank() ->
+                spokenHost(query)?.let { "https://$it" } ?: searchUrl(query)
             // Neither argument given ("open a browser"). The home page is the
             // search engine, so the user lands somewhere they can act from.
             else -> HOME_URL
         }
 
         val label = when {
+            // The player is "Podcasts" wherever it came from — its host is
+            // an implementation detail nobody said out loud.
+            target.startsWith(LocalPages.PLAYER_URL) -> "Podcasts"
             site.isNotBlank() && query.isNotBlank() -> shortLabel(query)
             url.isNotBlank() -> hostLabel(target)
             query.isNotBlank() -> shortLabel(query)
             else -> "web"
+        }
+
+        // ONE player window. A new search would otherwise open a second
+        // player beside the first (different ?q= means a different payload,
+        // which defeats the store's own dedupe), and two players both
+        // holding an <audio> is a recipe for a duet.
+        if (target.startsWith(LocalPages.PLAYER_URL)) {
+            browserPins()
+                .filter { it.payload.startsWith(LocalPages.PLAYER_URL) && it.payload != target }
+                .forEach { HudPinStore.remove(it.id) }
         }
 
         val open = browserPins()
@@ -368,7 +387,16 @@ class BrowserTool(private val context: Context) : AiTapTool {
             "radiogarden.com" to "radio.garden",
             "radiogarden.net" to "radio.garden",
             "radiogarden.org" to "radio.garden",
-            "listennotes" to "listennotes.com"
+            // The podcast names all land on the app's own player page. The
+            // real sites were measured unusable in a window this size —
+            // listennotes lays out 564px wide whatever it is told, podchaser
+            // never hydrates at all — so "open listen notes" means "I want
+            // podcasts", and the player is the thing here that can do that.
+            "listennotes" to "x3hub.local/podplayer.html",
+            "podchaser" to "x3hub.local/podplayer.html",
+            "podcasts" to "x3hub.local/podplayer.html",
+            "podcast" to "x3hub.local/podplayer.html",
+            "podcastplayer" to "x3hub.local/podplayer.html"
         )
 
         /**

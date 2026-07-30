@@ -648,13 +648,18 @@ object PageCommands {
         // bandcamp.com/search?q= returns 18 usable results for "bit shifter".
         Regex("^(?:the\\s+)?band\\s*camp(?:\\.com)?$", RegexOption.IGNORE_CASE)
             to "https://bandcamp.com/search?q=",
-        // Listen Notes' front page is nearly useless in a 226px-tall window:
-        // its masthead sits about 700px down, so opening it bare shows three
-        // nav links and empty space. The search page is content from the
-        // first row, which is what the wearer wanted when they named a
-        // subject. Verified: /search/?q=jazz returns "jazz in podcasts".
-        Regex("^(?:the\\s+)?listen\\s*notes(?:\\.com)?$", RegexOption.IGNORE_CASE)
-            to "https://www.listennotes.com/search/?q="
+        // Every podcast name routes to the app's own player page, because
+        // both podcast SITES were measured unusable in a window this size:
+        // listennotes lays out 564px wide whatever viewport it is given, and
+        // podchaser's app never hydrates — its search page renders a
+        // marketing brochure with zero input elements. The player is an
+        // ordinary web page at x3hub.local, searched via ?q=, so the page
+        // agent drives it exactly like any other site.
+        Regex(
+            "^(?:the\\s+)?(?:listen\\s*notes(?:\\.com)?|pod\\s*chaser(?:\\.com)?|podcasts?(?:\\s+player)?)$",
+            RegexOption.IGNORE_CASE
+        )
+            to "https://x3hub.local/podplayer.html?q="
         // Podchaser was asked for and is deliberately ABSENT, because it does
         // not work here at all — not by URL and not by typing. Measured in
         // this WebView: /search/podcasts?q=jazz redirects to the front page;

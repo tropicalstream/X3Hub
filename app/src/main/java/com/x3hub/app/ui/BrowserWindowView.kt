@@ -11,6 +11,7 @@ import android.util.Log
 import android.view.Gravity
 import com.x3hub.app.BuildConfig
 import com.x3hub.app.core.web.AdBlock
+import com.x3hub.app.core.web.LocalPages
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.InputMethodManager
@@ -990,8 +991,12 @@ class BrowserWindowView @JvmOverloads constructor(
         )
         // Every window filters. An ad slot is merely annoying on a phone; in
         // a 170px window it can BE the page, and each banner is one more
-        // clickable thing the page agent has to reason about.
-        requestInterceptor = { req -> AdBlock.intercept(req) }
+        // clickable thing the page agent has to reason about. App pages are
+        // answered first — x3hub.local resolves nowhere, so a request that
+        // slipped past the interceptor would only produce a DNS error.
+        requestInterceptor = { req ->
+            LocalPages.serve(context, req) ?: AdBlock.intercept(req)
+        }
         installServiceWorkerFilter()
         // Before configureWebView, and therefore before any load:
         // addJavascriptInterface only takes effect on the next navigation.

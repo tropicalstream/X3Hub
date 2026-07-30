@@ -611,7 +611,8 @@ class GeminiLiveClient(
                         .put(
                             "description",
                             "The site to search, when the user names one alongside a " +
-                                "subject: 'listennotes', 'radio garden', 'bandcamp', " +
+                                "subject: 'podcasts' (also listennotes or podchaser — all " +
+                                "three open the built-in podcast player), 'bandcamp', " +
                                 "'youtube', 'wikipedia', 'archive', 'reddit', 'github', " +
                                 "'ebay', 'amazon'. Pair it with 'query'. Prefer this over " +
                                 "building a search URL yourself — the site's real search " +
