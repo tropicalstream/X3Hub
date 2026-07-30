@@ -151,7 +151,6 @@ instructions"* / *"clear your instructions"* to inspect or reset.
 | **Right arm double tap**, empty space | Toggle Gemini (start / full exit). |
 | **Right arm triple tap**, on a window or pin | **Modify mode** — move it (dashed preview shows the destination) or tap the ✕ to delete. |
 | **Right arm triple tap**, empty space | Open **Settings**. |
-| Left trackpad slide left/right | Resize the selected window (portrait 3:4 ladder). |
 | Tap a bookmark/picture pin | Opens it (bookmark → reopens the page; picture → fullscreen viewer). |
 | Tap a live card | Refresh it now. |
 

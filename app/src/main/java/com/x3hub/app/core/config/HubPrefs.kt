@@ -13,6 +13,43 @@ object HubPrefs {
     private const val PREFS_FILE = "x3hub_config"
     private const val PREF_BARGE_IN = "voice_barge_in"
     private const val PREF_LINK_RESEARCH = "link_research"
+    private const val PREF_GEMINI_STT = "page_agent_gemini_stt"   // legacy boolean
+    private const val PREF_STT_MODE = "page_agent_stt_mode"
+
+    /** Who transcribes the page agent's spoken tasks. */
+    const val STT_GROQ = "groq"
+    const val STT_GEMINI = "gemini"
+    const val STT_AB = "ab"
+
+    /**
+     * GROQ (default) — Whisper, a dedicated transcriber, on a path where the
+     * wearer has stopped speaking and is waiting for the agent to move.
+     *
+     * GEMINI — one key runs the whole app. This is what happens anyway when
+     * no Groq key is configured; the setting only decides which to prefer
+     * when both exist.
+     *
+     * AB — send the SAME recording to both and log the two transcripts with
+     * their timings. Comparing by flipping a switch between utterances
+     * compares different audio as much as it compares transcribers; the only
+     * honest comparison gives them the same words to hear. Groq's answer is
+     * the one that reaches the agent, so turning this on does not change
+     * behaviour — it only costs a second request.
+     */
+    fun sttMode(context: Context): String =
+        prefs(context).getString(PREF_STT_MODE, null)
+            ?: if (prefs(context).getBoolean(PREF_GEMINI_STT, false)) STT_GEMINI else STT_GROQ
+
+    fun setSttMode(context: Context, mode: String) {
+        prefs(context).edit().putString(PREF_STT_MODE, mode).apply()
+    }
+
+    /** Cycles Groq → Gemini → A/B → Groq, for a one-button settings row. */
+    fun nextSttMode(current: String): String = when (current) {
+        STT_GROQ -> STT_GEMINI
+        STT_GEMINI -> STT_AB
+        else -> STT_GROQ
+    }
 
     /**
      * Whether the wearer can talk over Gemini mid-reply.

@@ -268,6 +268,7 @@ class HubSettingsOverlay(
 
         col.addView(buildBargeInRow())
         col.addView(buildGroundingRow())
+        col.addView(buildAgentSttRow())
         col.addView(bookmarksBox())
         return col
     }
@@ -322,6 +323,56 @@ class HubSettingsOverlay(
             showToast(
                 if (next) "Link reading on, web search off. Restart the session to apply."
                 else "Web search on, link reading off. Restart the session to apply."
+            )
+        }
+        render()
+        row.addView(toggle)
+        return row
+    }
+
+    /**
+     * Which service hears the page agent's spoken tasks.
+     *
+     * Only meaningful with both keys configured; with one, the app already
+     * uses whichever it has. Here so the two can be compared on the same
+     * device, and so a Gemini-only setup is visibly a supported way to run.
+     */
+    private fun buildAgentSttRow(): View {
+        val row = LinearLayout(activity)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.background = boxBg(fill = 0x14FFFFFF, stroke = 0x40FFFFFF, strokeW = 1)
+        row.setPadding(10, 2, 10, 2)
+        row.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
+
+        row.addView(
+            label("Page-agent ears", 15f, ACCENT, bold = true).apply {
+                layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+                maxLines = 1
+            }
+        )
+
+        lateinit var toggle: TextView
+        fun labelFor(mode: String) = when (mode) {
+            HubPrefs.STT_GEMINI -> "Gemini"
+            HubPrefs.STT_AB -> "A/B both"
+            else -> "Groq Whisper"
+        }
+        fun render() {
+            toggle.text = labelFor(HubPrefs.sttMode(activity))
+        }
+        toggle = button("", 200) {
+            val next = HubPrefs.nextSttMode(HubPrefs.sttMode(activity))
+            HubPrefs.setSttMode(activity, next)
+            render()
+            showToast(
+                when (next) {
+                    HubPrefs.STT_GEMINI -> "Spoken page tasks go to Gemini."
+                    HubPrefs.STT_AB ->
+                        "Both transcribe each task; Groq's answer is used, " +
+                            "both are logged."
+                    else -> "Spoken page tasks go to Groq Whisper."
+                }
             )
         }
         render()

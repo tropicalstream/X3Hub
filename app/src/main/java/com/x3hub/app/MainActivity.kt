@@ -190,7 +190,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 window.activate()
             }
-            showNotice("Listening — double-tap again when you're done.")
+            // Name the transcriber. The wearer can pick one in Settings, and
+            // a choice you cannot see the effect of is not really a choice —
+            // comparing two of them by ear needs to know which is listening.
+            showNotice(
+                "Listening (${AgentVoice.activeProviderLabel(applicationContext)}) " +
+                    "— double-tap again when you're done."
+            )
             uiHandler.removeCallbacks(autoStopAgentTask)
             uiHandler.postDelayed(autoStopAgentTask, AgentVoice.MAX_RECORD_MS)
         }, if (geminiWasLiveBeforeTask) 450L else 0L)
