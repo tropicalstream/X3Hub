@@ -829,20 +829,44 @@ class BrowserWindowView @JvmOverloads constructor(
             // container — is main-thread state with no lock of its own.
             post { onEdgeAxisExhausted(horiz) }
         }
+
+        /**
+         * The page's fixed chrome CHANGED — a control bar appeared or went
+         * away. The load-time read alone left the inset frozen at whatever
+         * the page first declared: the podcast player claims a bottom strip
+         * for its playbar, but the bar only exists once something plays, so
+         * before that the band was dead over plain content — edge scroll
+         * refusing to start in a strip where nothing but the list was
+         * showing.
+         */
+        @android.webkit.JavascriptInterface
+        fun onEdgeInsets(topCss: Int, bottomCss: Int) {
+            edgeInsetTopCss = topCss.coerceAtLeast(0)
+            edgeInsetBottomCss = bottomCss.coerceAtLeast(0)
+        }
     }
 
     /**
-     * Edge-band insets the CURRENT PAGE declared, in device px. A page sets
+     * Edge-band insets the CURRENT PAGE declared. A page sets
      * `window.__x3EdgeInsets = {top: cssPx, bottom: cssPx}` to say a strip of
      * its window is fixed chrome — a control bar, a pinned search field —
-     * where a resting cursor means "I am about to click", never "scroll".
-     * Zero for every page that does not declare, which is all of the web;
-     * re-read on each load so the values die with the page that set them.
+     * where a resting cursor means "I am about to click", never "scroll";
+     * a page whose chrome comes and goes pushes updates through
+     * X3Input.onEdgeInsets. Zero for every page that does not declare,
+     * which is all of the web; re-read on each load so the values die with
+     * the page that set them.
+     *
+     * Stored in CSS px and converted on demand, because a window RESIZE
+     * changes the page scale — a device-px snapshot taken at load would be
+     * wrong for the rest of the window's life after one trip up the ladder.
      */
-    @Volatile var edgeInsetTopPx: Int = 0
-        private set
-    @Volatile var edgeInsetBottomPx: Int = 0
-        private set
+    @Volatile private var edgeInsetTopCss: Int = 0
+    @Volatile private var edgeInsetBottomCss: Int = 0
+
+    val edgeInsetTopPx: Int
+        get() = (edgeInsetTopCss * (if (currentScale > 0f) currentScale else 1f)).toInt()
+    val edgeInsetBottomPx: Int
+        get() = (edgeInsetBottomCss * (if (currentScale > 0f) currentScale else 1f)).toInt()
 
     private fun readEdgeInsets() {
         runCatching {
@@ -851,9 +875,8 @@ class BrowserWindowView @JvmOverloads constructor(
                     "return (i.top||0)+','+(i.bottom||0);})()"
             ) { raw ->
                 val parts = raw.trim('"').split(',')
-                val scale = if (currentScale > 0f) currentScale else 1f
-                edgeInsetTopPx = ((parts.getOrNull(0)?.toFloatOrNull() ?: 0f) * scale).toInt()
-                edgeInsetBottomPx = ((parts.getOrNull(1)?.toFloatOrNull() ?: 0f) * scale).toInt()
+                edgeInsetTopCss = (parts.getOrNull(0)?.toFloatOrNull() ?: 0f).toInt()
+                edgeInsetBottomCss = (parts.getOrNull(1)?.toFloatOrNull() ?: 0f).toInt()
             }
         }
     }

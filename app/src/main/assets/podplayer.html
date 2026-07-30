@@ -105,8 +105,19 @@
 <script>
 /* Tell the host which strips of this window are CHROME: resting the cursor
    on the search bar or the player bar means "about to click", so the edge
-   bands must not scroll the list underneath. CSS px; the host scales. */
-window.__x3EdgeInsets = { top: 44, bottom: 62 };
+   bands must not scroll the list underneath. CSS px; the host scales.
+   The bottom inset TRACKS the playbar — declared only while the bar
+   exists, because a dead band over plain list content is exactly the bug
+   this feature was built to remove. */
+function declareInsets(){
+  var barShown = document.getElementById('player').style.display === 'block';
+  var b = barShown ? 62 : 0;
+  window.__x3EdgeInsets = { top: 44, bottom: b };
+  try {
+    if (window.X3Input && X3Input.onEdgeInsets) X3Input.onEdgeInsets(44, b);
+  } catch (e) {}
+}
+declareInsets();
 
 /* JSONP against the iTunes Search API: keyless, and a <script> tag is not
    subject to CORS, so this works from any origin including ours. */
@@ -190,6 +201,7 @@ function playEp(j){
   au.play();
   document.getElementById('ptitle').textContent = e.trackName;
   document.getElementById('player').style.display = 'block';
+  declareInsets(); /* the bar now exists — claim its strip from the band */
 }
 function toggle(){ if (au.paused) au.play(); else au.pause(); }
 function skip(s){ try { au.currentTime = Math.max(0, au.currentTime + s); } catch(e){} }
