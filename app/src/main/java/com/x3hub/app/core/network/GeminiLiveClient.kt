@@ -602,7 +602,16 @@ class GeminiLiveClient(
                     .put("url", JSONObject().put("type", "STRING")
                         .put("description", "The page to open: a full https URL or a bare host like 'wikipedia.org'."))
                     .put("query", JSONObject().put("type", "STRING")
-                        .put("description", "What to search for, in plain language, when no specific site is named.")))))
+                        .put("description", "What to search for, in plain language, when no specific site is named."))
+                    .put("mode", JSONObject().put("type", "STRING")
+                        .put(
+                            "description",
+                            "'dark' (default) or 'light'. Pages are darkened for the " +
+                                "display, which suits almost everything. Pass 'light' ONLY " +
+                                "when the user asks for light mode, normal colours, or says " +
+                                "a page is unreadable or the text matches its background — " +
+                                "some sites survive the darkening badly."
+                        )))))
 
         tools.put(JSONObject()
             .put("name", "read_page")

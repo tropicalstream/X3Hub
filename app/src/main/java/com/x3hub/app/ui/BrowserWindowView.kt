@@ -715,13 +715,16 @@ class BrowserWindowView @JvmOverloads constructor(
         // is simply transparent. NOTE this call is a no-op from Android 13
         // upward at targetSdk 33+, where the app theme decides instead —
         // the X3 Pro runs Android 12, so it does apply on the target device.
-        runCatching {
-            @Suppress("DEPRECATION")
-            wv.settings.forceDark = WebSettings.FORCE_DARK_ON
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            runCatching { wv.settings.isAlgorithmicDarkeningAllowed = true }
-        }
+        // TRUE, not `darkMode`. This runs from init, and the darkMode
+        // property is declared further down the class — Kotlin runs
+        // initializers in declaration order, so its backing field still
+        // reads FALSE here. Reading it turned force-dark off at
+        // construction, the initializer then quietly set the field to true,
+        // and the setter's own no-change guard swallowed every later
+        // attempt to switch dark on: each window rendered light forever,
+        // whatever anyone asked for. Dark is the default, so it is applied
+        // literally; the setter owns every change after construction.
+        applyForceDark(wv, true)
 
         runCatching { wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true) }
 
@@ -881,6 +884,48 @@ class BrowserWindowView @JvmOverloads constructor(
             val was = field
             field = value
             if (value && !was) injectMediaAutoplay()
+        }
+
+    /**
+     * Darken in the engine, or leave the page's own colours alone.
+     *
+     * White is maximum projector output on a waveguide — a white page is a
+     * lamp in the wearer's eye and black is simply transparent — so this is
+     * ON by default. But it is a RENDERER transform applied after layout,
+     * not a stylesheet, so when it mishandles a site there is nothing in the
+     * page to explain the result and nothing per-site we can do about it.
+     * Hence the switch.
+     */
+    private fun applyForceDark(wv: WebView, on: Boolean) {
+        runCatching {
+            @Suppress("DEPRECATION")
+            wv.settings.forceDark =
+                if (on) WebSettings.FORCE_DARK_ON else WebSettings.FORCE_DARK_OFF
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            runCatching { wv.settings.isAlgorithmicDarkeningAllowed = on }
+        }
+    }
+
+    /**
+     * Whether THIS window is darkened, set per window rather than globally.
+     *
+     * Dark is right for nearly everything on a waveguide, but it is a paint
+     * transform the page knows nothing about, and on a site it mishandles
+     * the text can come out the colour of its own background — Slashdot
+     * measured a perfect 21:1 in the DOM while being unreadable on the
+     * glass. Which pages need the exception is a judgement about the page
+     * in front of you, so it belongs to the window, and the wearer sets it
+     * by saying so when they open it.
+     */
+    var darkMode: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            applyForceDark(webView, value)
+            // The transform runs at paint time, so an already-rendered page
+            // keeps its old colours until it is laid out again.
+            runCatching { webView.reload() }
         }
 
     /**

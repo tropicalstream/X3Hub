@@ -33,6 +33,15 @@ class BrowserTool(private val context: Context) : AiTapTool {
 
         val url = arg(args, "url", "link", "address")
         val query = arg(args, "query", "search", "text", "q")
+        // "open it in light mode". Dark is the default because black is
+        // transparent on the waveguide and a white page is a lamp in the
+        // wearer's eye — but the darkening is a paint transform the page
+        // knows nothing about, and on a site it mishandles the text can come
+        // out the colour of its own background. Which pages need the
+        // exception is a judgement about the page in front of you, so the
+        // wearer makes it out loud when they open one.
+        val light = arg(args, "mode", "appearance", "theme", "colors", "colours")
+            .lowercase().let { it.contains("light") || it.contains("normal") }
 
         val target: String = when {
             url.isNotBlank() -> resolveUrl(url) ?: return Result.failure(
@@ -77,7 +86,13 @@ class BrowserTool(private val context: Context) : AiTapTool {
                 // Carrying the old size index forward is what stops "open
                 // archive.org" from silently shrinking a window the user
                 // had already resized.
-                content = alreadyOpen?.content ?: encodeSizeIndex(BASE_SIZE_INDEX)
+                // Keep the size the wearer had already chosen, but let a
+                // fresh request restate the appearance — asking for the same
+                // page "in light mode" has to mean something.
+                content = encodeSizeIndex(
+                    alreadyOpen?.let { sizeIndexOf(it) } ?: BASE_SIZE_INDEX,
+                    light = light
+                )
             )
         )
         if (!added) {
@@ -233,12 +248,29 @@ class BrowserTool(private val context: Context) : AiTapTool {
          * store that could disagree with the pin list.
          */
         fun sizeIndexOf(pin: HudPinStore.HudPin): Int =
-            pin.content.trim().toIntOrNull()?.coerceIn(0, WIDTH_LADDER.size - 1)
+            // substringBefore('|') so the appearance suffix below cannot cost
+            // the wearer a resize they had already made — the whole string
+            // used to be the number, and a bare toIntOrNull on "2|light"
+            // returns null and silently snaps the window back to base size.
+            pin.content.trim().substringBefore('|').toIntOrNull()
+                ?.coerceIn(0, WIDTH_LADDER.size - 1)
                 ?: BASE_SIZE_INDEX
 
+        /**
+         * Whether this window shows the site's own colours instead of being
+         * darkened. Dark is the default everywhere else, so absence means
+         * dark and old pins keep behaving exactly as they did.
+         */
+        fun isLightMode(pin: HudPinStore.HudPin): Boolean =
+            pin.content.contains(LIGHT_SUFFIX, ignoreCase = true)
+
         /** Value to hand [HudPinStore.updateContent] when persisting a resize. */
-        fun encodeSizeIndex(index: Int): String =
-            index.coerceIn(0, WIDTH_LADDER.size - 1).toString()
+        @JvmOverloads
+        fun encodeSizeIndex(index: Int, light: Boolean = false): String =
+            index.coerceIn(0, WIDTH_LADDER.size - 1).toString() +
+                if (light) LIGHT_SUFFIX else ""
+
+        private const val LIGHT_SUFFIX = "|light"
 
         /** Every browser window currently on the board, in board order. */
         fun browserPins(): List<HudPinStore.HudPin> =

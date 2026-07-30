@@ -390,6 +390,9 @@ class HudPinBoardController(
                 // see HudPinStore.wasRestoredFromDisk. Clicking it gives it
                 // its voice back.
                 w.autoplayWithSound = !HudPinStore.wasRestoredFromDisk(pin.id)
+                // Before the first load, so the page is painted the way it
+                // was asked for rather than darkened and then reloaded.
+                w.darkMode = !BrowserTool.isLightMode(pin)
                 val snap = pin.snapshotPath?.takeIf { java.io.File(it).exists() }
                 when {
                     resumeUrl == null -> Unit
