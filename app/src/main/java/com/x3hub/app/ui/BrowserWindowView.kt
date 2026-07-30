@@ -1979,7 +1979,90 @@ class BrowserWindowView @JvmOverloads constructor(
                   return true;
                 } catch (e) { return false; }
               }
-              fix();
+              /**
+               * Let a page COMPRESS to the width it was given.
+               *
+               * Listen Notes is told width=320 and lays out at 564 anyway,
+               * because something inside it refuses to be narrower and the
+               * engine grows the layout viewport to fit. The scale still
+               * suits 320, so barely half the page is on the glass and the
+               * wearer reads a column of chrome down one side — the "it
+               * isn't rendering" and "the marketing is overwhelming" report
+               * are the same measurement.
+               *
+               * These are the four things that usually refuse: a fixed-width
+               * image, a table, a preformatted block, and an element with an
+               * explicit min-width in px. Capping them costs nothing on a
+               * page that already fits, since max-width only ever binds when
+               * something is too wide.
+               */
+              function squeeze(){
+                try {
+                  if (document.getElementById('x3-fit')) return;
+                  var s = document.createElement('style');
+                  s.id = 'x3-fit';
+                  s.textContent =
+                    'img,video,canvas,svg,iframe,table,pre{max-width:100% !important;' +
+                    'height:auto !important}' +
+                    'pre,code{white-space:pre-wrap !important;word-break:break-word}' +
+                    // Only the ones wide enough to be the culprit; a 40px
+                    // min-width on an icon is not what stretched the page.
+                    '[style*="min-width"]{min-width:0 !important}';
+                  (document.head || document.documentElement).appendChild(s);
+                } catch (e) {}
+              }
+
+              /**
+               * Take down what a page pins over its own content.
+               *
+               * On a phone a sticky app-install bar or newsletter slab costs
+               * a tenth of the screen. Here the whole window is 226px tall,
+               * so one of them IS the window, and the wearer scrolls a page
+               * they cannot see. Both podcast sites do it and it is what
+               * "the marketing is overwhelming" describes.
+               *
+               * Measured by GEOMETRY, not by class name: only elements the
+               * page has fixed or stuck to the viewport, and only those tall
+               * enough to matter. Podchaser's classes are hashed — _3hmsj,
+               * _txj152, _buvx5d — so a name-based rule would be broken by
+               * their next deploy, while "pinned and eating a third of the
+               * glass" stays true whatever it is called.
+               *
+               * A pinned bar SHORTER than the cutoff is left alone: that is
+               * a normal header, and hiding those loses the nav and the
+               * search box the wearer came for.
+               */
+              function unpin(){
+                try {
+                  var vh = window.innerHeight || 800;
+                  var limit = vh * 0.28;
+                  var all = document.body ? document.body.querySelectorAll('*') : [];
+                  var n = 0;
+                  for (var i = 0; i < all.length && n < 12; i++) {
+                    var e = all[i];
+                    var cs = getComputedStyle(e);
+                    if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+                    var r = e.getBoundingClientRect();
+                    if (r.height < limit || r.width < 80) continue;
+                    // Never the scroll container itself.
+                    if (e === document.body || e === document.documentElement) continue;
+                    e.style.setProperty('display', 'none', 'important');
+                    n++;
+                  }
+                  return n;
+                } catch (e) { return 0; }
+              }
+
+              // ONE tick for all three, re-run on a schedule. Each is
+              // separately idempotent, and a single-page app re-rendering its
+              // head throws our styles away with its own — measured: the
+              // canvas survived the first load and the fit rule did not,
+              // purely because only one of them was being re-checked.
+              function tick(){ fix(); squeeze(); unpin(); }
+              tick();
+              setTimeout(tick, 700);
+              setTimeout(tick, 1800);
+              setTimeout(tick, 4000);
               // A single-page app can paint its background after first load,
               // and can also throw ours away with a re-render; re-checking is
               // cheap and fix() no-ops once anything opaque is in place.
