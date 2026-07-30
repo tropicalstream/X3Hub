@@ -2082,8 +2082,14 @@ class BrowserWindowView @JvmOverloads constructor(
                   if (document.getElementById('x3-fit')) return;
                   var s = document.createElement('style');
                   s.id = 'x3-fit';
+                  // canvas and svg are deliberately NOT in this list. A
+                  // canvas's CSS size is its rendering surface: height:auto
+                  // collapsed radio.garden's WebGL globe to a 0x0 rect and
+                  // the wearer heard a station playing over a blank blue
+                  // window. Neither was ever a measured cause of runaway
+                  // width — that was document layout, not drawing surfaces.
                   s.textContent =
-                    'img,video,canvas,svg,iframe,table,pre{max-width:100% !important;' +
+                    'img,video,iframe,table,pre{max-width:100% !important;' +
                     'height:auto !important}' +
                     'pre,code{white-space:pre-wrap !important;word-break:break-word}' +
                     // Only the ones wide enough to be the culprit; a 40px
@@ -2116,6 +2122,17 @@ class BrowserWindowView @JvmOverloads constructor(
               function unpin(){
                 try {
                   var vh = window.innerHeight || 800;
+                  // Unpinning exists to reclaim READING space: a promo slab
+                  // stuck over a page the wearer is scrolling. A page that
+                  // does not scroll has no reading space to reclaim — it is
+                  // an app shell, and its fixed elements ARE the app. On
+                  // radio.garden this hid the div holding the WebGL globe
+                  // and five of the site's own panels, leaving audio over a
+                  // blank blue window.
+                  var sh = Math.max(
+                    document.documentElement.scrollHeight,
+                    document.body ? document.body.scrollHeight : 0);
+                  if (sh < vh * 1.2) return 0;
                   var limit = vh * 0.28;
                   var all = document.body ? document.body.querySelectorAll('*') : [];
                   var n = 0;
@@ -2125,6 +2142,11 @@ class BrowserWindowView @JvmOverloads constructor(
                     if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
                     var r = e.getBoundingClientRect();
                     if (r.height < limit || r.width < 80) continue;
+                    // Near-viewport-sized is the app itself, not a bar over
+                    // it; and anything drawing or playing is a surface the
+                    // wearer is here FOR, whatever its geometry.
+                    if (r.height > vh * 0.85) continue;
+                    if (e.querySelector && e.querySelector('canvas,video,audio')) continue;
                     // Never the scroll container itself.
                     if (e === document.body || e === document.documentElement) continue;
                     e.style.setProperty('display', 'none', 'important');
