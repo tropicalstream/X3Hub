@@ -355,6 +355,25 @@ object HudPinStore {
         notifyListeners()
     }
 
+    /**
+     * Persist several moves as ONE change with ONE listener pass.
+     *
+     * Placing a window settles its whole cluster — the anchor plus every
+     * neighbour that squared up to it. Written one at a time that is one
+     * full board render per pin, and the wearer watches the settle happen
+     * as a stutter of separate hops instead of one motion.
+     */
+    fun updatePositions(moves: Map<String, Pair<Int, Int>>) {
+        if (moves.isEmpty()) return
+        synchronized(lock) {
+            val next = all().map { pin ->
+                moves[pin.id]?.let { (x, y) -> pin.copy(customX = x, customY = y) } ?: pin
+            }
+            persist(next)
+        }
+        notifyListeners()
+    }
+
     /** Engine writes a live card's fresh display text (success path).
      *  Clears any stale flag and status note. */
     fun updateContent(id: String, content: String) {

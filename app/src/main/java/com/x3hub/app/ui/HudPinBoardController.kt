@@ -247,7 +247,7 @@ class HudPinBoardController(
 
         val zone = computeZone()
         lastZone = zone
-        val gap = dp(6)
+        val gap = dp(GAP_DP)
         var x = zone.left
         var y = zone.top
         var rowH = 0
@@ -282,6 +282,7 @@ class HudPinBoardController(
                 // custom pin the candidate cell would overlap, and hard-
                 // clamp the result inside the zone.
                 var guard = 0
+                var found = false
                 while (guard++ < 64) {
                     if (x + w > zone.right && x > zone.left) {
                         x = zone.left
@@ -297,11 +298,41 @@ class HudPinBoardController(
                         x = blocker[2] + gap
                         continue
                     }
+                    found = true
                     break
                 }
                 lp.leftMargin = x
                 lp.topMargin = y
                 clampToZone(lp, w, h, zone)
+                // Running out of room used to mean landing wherever the
+                // search gave up — which is how a news card ended up drawn
+                // straight over a browser window on a ten-pin board. The
+                // clamp can do it too, by pulling a pin back inside the zone
+                // and into something. Either way, go BELOW everything
+                // instead: off the bottom is recoverable by moving a pin,
+                // on top of a window hides content with no clue why.
+                if (!found || collidesWithCustom(lp, w, h, customRects, gap)) {
+                    // Try below everything — but only KEEP it if it is
+                    // actually better. On a board already at capacity the
+                    // clamp drags that fallback straight back up into the
+                    // window row, and blind faith in it put a browser window
+                    // on top of another one. When nothing fits, the honest
+                    // move is the position that hides the least.
+                    val keepX = lp.leftMargin
+                    val keepY = lp.topMargin
+                    val before = overlapArea(keepX, keepY, w, h, customRects)
+                    lp.leftMargin = zone.left
+                    lp.topMargin = (customRects.maxOfOrNull { it[3] } ?: zone.top) + gap
+                    clampToZone(lp, w, h, zone)
+                    val after = overlapArea(lp.leftMargin, lp.topMargin, w, h, customRects)
+                    if (after >= before) {
+                        lp.leftMargin = keepX
+                        lp.topMargin = keepY
+                    }
+                    x = lp.leftMargin
+                    y = lp.topMargin
+                    rowH = 0
+                }
                 x = lp.leftMargin + w + gap
                 y = lp.topMargin
                 rowH = maxOf(rowH, h)
@@ -995,14 +1026,379 @@ class HudPinBoardController(
         val w = container.width.takeIf { it > 0 } ?: container.layoutParams.width
         val h = container.height.takeIf { it > 0 } ?: container.layoutParams.height
         val lp = container.layoutParams as FrameLayout.LayoutParams
-        lp.leftMargin = (screenX - boardLoc[0] - w / 2f).toInt()
-        lp.topMargin = (screenY - boardLoc[1] - h / 2f).toInt()
-        clampToZone(lp, w, h, lastZone ?: computeZone())
+        val zone = lastZone ?: computeZone()
+        // The SAME resolve the ghost just showed. Committing from the raw
+        // cursor instead would put the pin somewhere the wearer had been
+        // shown it would not go, which is worse than having no snapping.
+        val (sx, sy) = resolveSnap(
+            (screenX - boardLoc[0] - w / 2f).toInt(),
+            (screenY - boardLoc[1] - h / 2f).toInt(),
+            w, h, id, zone
+        )
+        lp.leftMargin = sx
+        lp.topMargin = sy
+        clampToZone(lp, w, h, zone)
         container.layoutParams = lp
         exitModifyMode()
-        // persists + re-renders through the store observer
-        HudPinStore.updatePosition(id, lp.leftMargin, lp.topMargin)
+        // Square up the same-size neighbours around the landing spot, then
+        // persist the anchor AND the settled cluster as one store write —
+        // one render, one visible motion.
+        val settled = settleClusterAround(id, zone)
+        HudPinStore.updatePositions(
+            settled + (id to (lp.leftMargin to lp.topMargin))
+        )
         return true
+    }
+
+    // ── Magnetic tiling ──────────────────────────────────────────────
+
+    /** Total px this rect would cover of any hand-placed pin. */
+    private fun overlapArea(l: Int, t: Int, w: Int, h: Int, rects: List<IntArray>): Long {
+        var sum = 0L
+        for (r in rects) {
+            val ox = minOf(l + w, r[2]) - maxOf(l, r[0])
+            val oy = minOf(t + h, r[3]) - maxOf(t, r[1])
+            if (ox > 0 && oy > 0) sum += ox.toLong() * oy
+        }
+        return sum
+    }
+
+    // ── Cluster settle ───────────────────────────────────────────────
+
+    /**
+     * After a pin is PLACED, square up its same-size neighbours around it.
+     *
+     * The drag magnets align the pin in the wearer's hand; this aligns the
+     * pins already on the board. The trigger is deliberate: placement is
+     * the one moment where there is an unambiguous anchor, an unambiguous
+     * intent ("this cluster matters to me right now"), and a wearer who is
+     * WATCHING — a board that rearranges itself at render time behind the
+     * wearer's back is the version that was built once and thrown away.
+     *
+     * The rules are the standard ones from design-tool tidy-up:
+     *
+     *  ANCHOR IS LAW. The pin the wearer just placed does not move again —
+     *  neighbours conform to it, never the reverse. Moving the thing the
+     *  wearer just deliberately positioned is the cardinal sin of every
+     *  auto-layout that gets turned off.
+     *
+     *  SAME SIZE ONLY. Two 170x226 windows beside each other are a row and
+     *  everyone can see how it should look. A 66x96 bookmark beside a
+     *  226-tall window has no such answer, and guessing produced last
+     *  night's 3px-into-the-neighbour bug. Exact width AND height match.
+     *
+     *  ADJACENT MEANS ADJACENT. Strict perpendicular overlap (a stacked
+     *  card is not "beside" a window — measured, that mistake pulled
+     *  windows toward a card in a different row), and the facing edges
+     *  within [SETTLE_DP]. Alignment: shared top for a row, shared left
+     *  for a column, and the gap normalised to exactly [GAP_DP].
+     *
+     *  IT CHAINS. Each settled neighbour anchors ITS neighbours, so
+     *  placing one window squares the whole row, not just the pair. BFS
+     *  with a visited set; already-perfect neighbours still propagate.
+     *
+     *  NEVER INTO A COLLISION. A move that would land a neighbour within
+     *  [GAP_DP] of anything else, or that the zone clamp would bend, is
+     *  skipped — that pin stays put and does not propagate. Skipping
+     *  beats "mostly aligned but now overlapping".
+     *
+     * Returns id -> (x, y) for every pin that should move; caller batches
+     * the store write so the settle is one render, not one per pin.
+     */
+    private fun settleClusterAround(anchorId: String, zone: Zone): Map<String, Pair<Int, Int>> {
+        val gap = dp(GAP_DP)
+        val reach = dp(SETTLE_DP)
+
+        data class Box(
+            val id: String,
+            var l: Int,
+            var t: Int,
+            val w: Int,
+            val h: Int,
+            /**
+             * May the settle move this pin? Flow-placed pins say no: settling
+             * one would write it a custom position, silently freezing it out
+             * of the auto-layout forever — it would never reflow again and
+             * the wearer never chose that. They still block, they just do
+             * not follow. (Review finding.)
+             */
+            val movable: Boolean
+        )
+
+        val flowIds = pinsSnapshot
+            .filter { it.customX < 0 || it.customY < 0 }
+            .mapTo(mutableSetOf()) { it.id }
+        val boxes = ArrayList<Box>(pinViews.size + 1)
+        for ((id, v) in pinViews) {
+            val lp = v.layoutParams as? FrameLayout.LayoutParams ?: continue
+            val w = lp.width.takeIf { it > 0 } ?: v.width
+            val h = lp.height.takeIf { it > 0 } ?: v.height
+            if (w <= 0 || h <= 0) continue
+            boxes += Box(id, lp.leftMargin, lp.topMargin, w, h, id !in flowIds)
+        }
+        // The live camera preview shares the zone. render() already refuses
+        // to tile grid pins under it; the settle gets the same rule via a
+        // pseudo-box that can never move and never chain. (Review finding.)
+        activity.findViewById<View?>(R.id.unipanelCameraPreviewFrame)?.let { cam ->
+            if (cam.visibility == View.VISIBLE && cam.width > 0) {
+                boxes += Box(
+                    " camera", boardLocalX(cam), boardLocalY(cam),
+                    cam.width, cam.height, movable = false
+                )
+            }
+        }
+        val anchor = boxes.firstOrNull { it.id == anchorId } ?: return emptyMap()
+
+        val moves = LinkedHashMap<String, Pair<Int, Int>>()
+        val visited = mutableSetOf(anchorId)
+        val queue = ArrayDeque<Box>()
+        queue += anchor
+
+        while (queue.isNotEmpty()) {
+            val a = queue.removeFirst()
+            for (b in boxes) {
+                if (b.id in visited) continue
+                if (!b.movable) continue
+                if (b.w != a.w || b.h != a.h) continue
+                // The perpendicular offset is bounded by the same reach as
+                // the facing gap. Bare overlap is NOT enough: two 226-tall
+                // windows in a 430-tall zone ALWAYS overlap vertically, so
+                // without the bound a window parked at the top of the zone
+                // could be yanked 204px down to join a row it was never
+                // part of — the moved-what-the-wearer-placed failure class
+                // that got the render-time pass deleted. (Review finding.)
+                val offV = kotlin.math.abs(b.t - a.t)
+                val offH = kotlin.math.abs(b.l - a.l)
+                val overlapV = b.t < a.t + a.h && b.t + b.h > a.t && offV <= reach
+                val overlapH = b.l < a.l + a.w && b.l + b.w > a.l && offH <= reach
+                // Facing-edge distance on the packing axis, negative = overlap.
+                val dxRight = b.l - (a.l + a.w)
+                val dxLeft = a.l - (b.l + b.w)
+                val dyBelow = b.t - (a.t + a.h)
+                val dyAbove = a.t - (b.t + b.h)
+                var tx = b.l
+                var ty = b.t
+                when {
+                    overlapV && dxRight > -gap && dxRight <= reach -> {
+                        tx = a.l + a.w + gap; ty = a.t
+                    }
+                    overlapV && dxLeft > -gap && dxLeft <= reach -> {
+                        tx = a.l - gap - b.w; ty = a.t
+                    }
+                    overlapH && dyBelow > -gap && dyBelow <= reach -> {
+                        ty = a.t + a.h + gap; tx = a.l
+                    }
+                    overlapH && dyAbove > -gap && dyAbove <= reach -> {
+                        ty = a.t - gap - b.h; tx = a.l
+                    }
+                    else -> continue
+                }
+                // Already perfect: no move to guard, but it still anchors
+                // the rest of its row — a live card that has grown into the
+                // gap NEXT TO it must not sever the chain. (Review finding.)
+                if (tx == b.l && ty == b.t) {
+                    visited += b.id
+                    queue += b
+                    continue
+                }
+                // In-zone, un-bent by the clamp?
+                val probe = FrameLayout.LayoutParams(b.w, b.h)
+                    .apply { leftMargin = tx; topMargin = ty }
+                clampToZone(probe, b.w, b.h, zone)
+                if (probe.leftMargin != tx || probe.topMargin != ty) continue
+                // Colliders are judged against PLANNED positions (boxes are
+                // mutated as moves are accepted). A collider that is itself
+                // the next link of the chain — same size, not yet settled,
+                // and adjacent to where b is GOING — does not veto the move:
+                // it will be pushed onward when b is processed as an anchor.
+                // Without this a row of three could never settle, because
+                // squaring the middle window put its edge exactly against
+                // the third, and the guard refused. Anything else in the
+                // way is a hard stop for this neighbour.
+                var hardCollision = false
+                for (o in boxes) {
+                    if (o.id == b.id) continue
+                    val tooClose =
+                        tx < o.l + o.w + gap && tx + b.w + gap > o.l &&
+                            ty < o.t + o.h + gap && ty + b.h + gap > o.t
+                    if (!tooClose) continue
+                    val chainable = o.id !in visited && o.movable &&
+                        o.w == b.w && o.h == b.h &&
+                        // adjacent to b's TARGET, not to its old spot
+                        (o.l - (tx + b.w)) <= reach && (tx - (o.l + o.w)) <= reach &&
+                        (o.t - (ty + b.h)) <= reach && (ty - (o.t + o.h)) <= reach
+                    if (!chainable) { hardCollision = true; break }
+                }
+                if (hardCollision) continue
+                visited += b.id
+                if (tx != b.l || ty != b.t) {
+                    b.l = tx
+                    b.t = ty
+                    moves[b.id] = tx to ty
+                }
+                queue += b
+            }
+        }
+
+        // TRANSACTIONAL: a chain is only as good as its last link. If a
+        // deferred collider never got pushed (its own move was refused by
+        // the zone or by something solid), the planned board holds a moved
+        // pin closer than the gap to something — possibly overlapping,
+        // possibly merely touching, both worse than the board the wearer
+        // arranged. The per-move guard only ever waives clearance for chain
+        // candidates, and a candidate that DID move sits at exactly the gap
+        // by construction, so any violation here is precisely a failed
+        // link. Settle nothing rather than persist it.
+        val bad = moves.keys.any { id ->
+            val m = boxes.first { it.id == id }
+            boxes.any { o ->
+                o.id != id &&
+                    m.l < o.l + o.w + gap && m.l + m.w + gap > o.l &&
+                    m.t < o.t + o.h + gap && m.t + m.h + gap > o.t
+            }
+        }
+        return if (bad) emptyMap() else moves
+    }
+
+    /** Does this rect land within [gap] of any hand-placed pin? */
+    private fun collidesWithCustom(
+        lp: FrameLayout.LayoutParams,
+        w: Int,
+        h: Int,
+        customRects: List<IntArray>,
+        gap: Int
+    ): Boolean = customRects.any { r ->
+        lp.leftMargin < r[2] + gap && lp.leftMargin + w + gap > r[0] &&
+            lp.topMargin < r[3] + gap && lp.topMargin + h + gap > r[1]
+    }
+
+    /** The snapped edge chosen on each axis last frame, for hysteresis. */
+    private var snappedX: Int? = null
+    private var snappedY: Int? = null
+
+    /** Whether the last resolve actually locked onto something. */
+    private var snapEngaged = false
+
+    /**
+     * Pull a dragged pin onto a neighbouring window's edge, if it is close.
+     *
+     * Snapping to OTHER WINDOWS rather than to a fixed lattice is the whole
+     * point: a lattice quantises everywhere, so every position becomes
+     * somebody else's idea of correct and open space stops being free. Edge
+     * snapping only pulls where tiling is actually meaningful, which is what
+     * lets "drop it roughly there" and "tile it exactly" be the same gesture.
+     *
+     * The candidates per axis are the four that matter — butt against the
+     * neighbour's far side, butt against its near side, or align with either
+     * of its edges — plus the zone's own edges. Because the size ladder has
+     * fixed rungs, two same-rung windows butted together are perfectly
+     * tiled by construction; nothing here has to know that.
+     *
+     * There is no stickiness to escape from. Both the ghost and the commit
+     * resolve from the CURRENT cursor position every time, so nothing
+     * accumulates: move a few px past the threshold and the pull is simply
+     * gone next frame. That is the failure this avoids — a snap that tracks
+     * its own output drifts behind the finger and reads as the app fighting
+     * you.
+     *
+     * EVERY pin is a magnet, not just the windows. Restricting it to
+     * windows was the cautious first cut and it left the real raggedness
+     * untouched: three bookmarks that were plainly meant to be a row sat at
+     * y=143, 146 and 150, because nothing could pull them onto each other.
+     * The competing-targets worry that motivated the restriction is handled
+     * where it belongs — nearest-wins plus hysteresis — rather than by
+     * making most of the board unalignable.
+     */
+    private fun resolveSnap(
+        rawX: Int,
+        rawY: Int,
+        w: Int,
+        h: Int,
+        movingId: String?,
+        zone: Zone
+    ): Pair<Int, Int> {
+        val gap = dp(GAP_DP)
+        val threshold = dp(SNAP_DP)
+        val xs = ArrayList<Int>(48)
+        val ys = ArrayList<Int>(48)
+
+        // A pin is only a magnet for the axis it is actually BESIDE you on.
+        // Without this the nearest edge in the whole board wins regardless of
+        // where it is: dragging a window into the row at y=248 snapped its
+        // left to 230, the right edge of a news card living at y=44..232 —
+        // two things that never touch. It read as the window landing
+        // somewhere arbitrary, and it pulled AWAY from the window it was
+        // being placed next to. Requiring overlap on the perpendicular axis
+        // is what makes the pull mean "put it beside that".
+        for ((id, v) in pinViews) {
+            if (id == movingId) continue
+            val lp = v.layoutParams as? FrameLayout.LayoutParams ?: continue
+            val ow = lp.width
+            val oh = lp.height
+            if (ow <= 0 || oh <= 0) continue
+            val l = lp.leftMargin
+            val t = lp.topMargin
+            // STRICT overlap, no slack. Slack was the first attempt and it
+            // let a stacked pin count as a side-by-side one: a news card
+            // ending at y=232 was treated as beside a window starting at
+            // y=251, so the window kept snapping its left edge to the card's
+            // right edge — two objects that are above and below each other,
+            // not next to each other. If the spans do not actually cross,
+            // there is no shared row to tile into.
+            val besideVertically = rawY < t + oh && rawY + h > t
+            val besideHorizontally = rawX < l + ow && rawX + w > l
+            if (besideVertically) {
+                xs += l + ow + gap  // sit to its right
+                xs += l - w - gap   // sit to its left
+                xs += l             // left edges flush
+                xs += l + ow - w    // right edges flush
+            }
+            if (besideHorizontally) {
+                ys += t + oh + gap  // sit below it
+                ys += t - h - gap   // sit above it
+                ys += t             // top edges flush
+                ys += t + oh - h    // bottom edges flush
+            }
+        }
+        // The zone's own edges, so a row can be squared off against the
+        // display rather than floating a few px inside it.
+        xs += zone.left
+        xs += zone.right - w
+        ys += zone.top
+        ys += zone.bottom - h
+
+        snappedX = nearest(rawX, xs, threshold, snappedX)
+        snappedY = nearest(rawY, ys, threshold, snappedY)
+        snapEngaged = snappedX != null || snappedY != null
+        return (snappedX ?: rawX) to (snappedY ?: rawY)
+    }
+
+    /**
+     * Nearest candidate within [threshold], preferring the one already held.
+     *
+     * The preference is hysteresis, and it is not optional: with several
+     * windows on the board two candidates land within a few px of each other
+     * often, and without it the ghost flickers between them while the hand
+     * is holding still.
+     */
+    private fun nearest(v: Int, cands: List<Int>, threshold: Int, held: Int?): Int? {
+        var best: Int? = null
+        var bestD = threshold + 1
+        for (c in cands) {
+            val d = kotlin.math.abs(c - v)
+            if (d <= threshold && d < bestD) { best = c; bestD = d }
+        }
+        if (held != null && kotlin.math.abs(held - v) <= threshold) {
+            // Only give up a held edge for one that is clearly nearer.
+            if (best == null || bestD + dp(4) >= kotlin.math.abs(held - v)) return held
+        }
+        return best
+    }
+
+    private fun clearSnap() {
+        snappedX = null
+        snappedY = null
+        snapEngaged = false
     }
 
     // ── Move preview ─────────────────────────────────────────────────
@@ -1031,9 +1427,13 @@ class HudPinBoardController(
             ?: FrameLayout.LayoutParams(w, h)
         lp.width = w
         lp.height = h
-        lp.leftMargin = (screenX - boardLoc[0] - w / 2f).toInt()
-        lp.topMargin = (screenY - boardLoc[1] - h / 2f).toInt()
-        clampToZone(lp, w, h, lastZone ?: computeZone())
+        val zone = lastZone ?: computeZone()
+        val rawX = (screenX - boardLoc[0] - w / 2f).toInt()
+        val rawY = (screenY - boardLoc[1] - h / 2f).toInt()
+        val (sx, sy) = resolveSnap(rawX, rawY, w, h, id, zone)
+        lp.leftMargin = sx
+        lp.topMargin = sy
+        clampToZone(lp, w, h, zone)
 
         val view = movePreview ?: View(activity).also { v ->
             v.background = GradientDrawable().apply {
@@ -1050,10 +1450,25 @@ class HudPinBoardController(
             movePreview = v
         }
         view.layoutParams = lp
+        // Dashed while free, solid while locked onto a neighbour. The border
+        // is already the thing the wearer is watching, so it can answer
+        // "will this land where I think" without adding any new chrome —
+        // and on a 66px pin at arm's length, a state you have to infer from
+        // a few px of position change is a state you cannot see.
+        (view.background as? GradientDrawable)?.setStroke(
+            dp(if (snapEngaged) 2 else 1),
+            if (snapEngaged) 0xFF7FDBFF.toInt() else 0xFFFFB347.toInt(),
+            if (snapEngaged) 0f else 6f * density,
+            if (snapEngaged) 0f else 4f * density
+        )
         view.visibility = View.VISIBLE
     }
 
     private fun hideMovePreview() {
+        // Held edges belong to the drag that is ending; carrying them into
+        // the next one would snap the next pin to a magnet it was never
+        // near, from the first frame.
+        clearSnap()
         val v = movePreview ?: return
         movePreview = null
         runCatching { board.removeView(v) }
@@ -1091,6 +1506,42 @@ class HudPinBoardController(
 
     companion object {
         private const val CHIP_TAG = "hud_pin_chip"
+
+        /**
+         * How near an edge has to be, in dp, before the pin is pulled onto
+         * it. Wide enough to catch a cursor driven by a temple pad, which is
+         * a good deal shakier than a mouse; well short of the 40px tap slop,
+         * so aiming at a gap between two windows still lands in the gap.
+         *
+         * Started at 14 and it was reported as "I'm not noticing it" — 14px
+         * on a shaky cursor means you have to already be placing the window
+         * correctly for the magnet to help, which is the one case where help
+         * is worth nothing. Safe to widen now that a magnet only pulls
+         * toward pins you are genuinely beside.
+         */
+        private const val SNAP_DP = 26
+
+        /**
+         * Breathing room between any two pins, used by BOTH the flow grid
+         * and the magnets so a hand-placed pin sits on the same rhythm as an
+         * auto-placed one. At the old 6px, tiles read as one seam rather
+         * than as separate objects — a gap has to survive being looked at
+         * through a waveguide at arm's length, where a few px of dark
+         * between two dark panels is not a gap at all.
+         *
+         * Three windows at the 170px rung still fit a 628px zone with room
+         * to spare: 3*170 + 2*12 = 534.
+         */
+        private const val GAP_DP = 12
+
+        /**
+         * How far apart two same-size pins' facing edges may be and still
+         * count as "meant to be adjacent" when a placement settles the
+         * cluster. Wider than the drag threshold: by the time the wearer
+         * has placed something, a near-miss of a few dozen px is clutter,
+         * not a decision.
+         */
+        private const val SETTLE_DP = 40
 
         // Content-sized notes/live cards retain their former widths as caps.
         private const val NOTE_MAX_WIDTH_DP = 100
