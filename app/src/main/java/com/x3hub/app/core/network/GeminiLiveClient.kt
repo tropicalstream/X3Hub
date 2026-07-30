@@ -592,7 +592,11 @@ class GeminiLiveClient(
                     "told about it: 'open Wikipedia', 'pull up the BBC', 'show me the tide " +
                     "times', 'play that on YouTube', 'look up X'. " +
                     "Pass 'url' when the user names a site or page; pass 'query' to open a " +
-                    "search for it instead. With neither, a search home page opens. " +
+                    "search for it instead. When the user names BOTH a subject and a site — " +
+                    "'open jazz on listennotes', 'find Bit Shifter on bandcamp', 'KPFA on " +
+                    "radio garden' — pass 'query' for the subject AND 'site' for the site, " +
+                    "so the site's own results open rather than a web search about it. " +
+                    "With none of them, a search home page opens. " +
                     "At most three windows can be open at once; opening a fourth is refused, " +
                     "so offer to close one. The window opens INERT — after it returns, say in " +
                     "one short sentence that it is open and that one click activates it.")
@@ -602,7 +606,17 @@ class GeminiLiveClient(
                     .put("url", JSONObject().put("type", "STRING")
                         .put("description", "The page to open: a full https URL or a bare host like 'wikipedia.org'."))
                     .put("query", JSONObject().put("type", "STRING")
-                        .put("description", "What to search for, in plain language, when no specific site is named."))
+                        .put("description", "What to search for, in plain language. Use with 'site' to search that site."))
+                    .put("site", JSONObject().put("type", "STRING")
+                        .put(
+                            "description",
+                            "The site to search, when the user names one alongside a " +
+                                "subject: 'listennotes', 'radio garden', 'bandcamp', " +
+                                "'youtube', 'wikipedia', 'archive', 'reddit', 'github', " +
+                                "'ebay', 'amazon'. Pair it with 'query'. Prefer this over " +
+                                "building a search URL yourself — the site's real search " +
+                                "address is known here and guessing one tends to miss."
+                        ))
                     .put("mode", JSONObject().put("type", "STRING")
                         .put(
                             "description",

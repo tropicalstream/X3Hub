@@ -647,7 +647,21 @@ object PageCommands {
         // on the music site they were asking to search. Measured on device:
         // bandcamp.com/search?q= returns 18 usable results for "bit shifter".
         Regex("^(?:the\\s+)?band\\s*camp(?:\\.com)?$", RegexOption.IGNORE_CASE)
-            to "https://bandcamp.com/search?q="
+            to "https://bandcamp.com/search?q=",
+        // Listen Notes' front page is nearly useless in a 226px-tall window:
+        // its masthead sits about 700px down, so opening it bare shows three
+        // nav links and empty space. The search page is content from the
+        // first row, which is what the wearer wanted when they named a
+        // subject. Verified: /search/?q=jazz returns "jazz in podcasts".
+        Regex("^(?:the\\s+)?listen\\s*notes(?:\\.com)?$", RegexOption.IGNORE_CASE)
+            to "https://www.listennotes.com/search/?q="
+        // radio.garden is deliberately ABSENT. Its search looks like it takes
+        // a query string and does not: opening /search?q=jazz was measured
+        // landing on /search with the parameter dropped, an empty input and
+        // zero results. Its own single-page app owns that box, so the way in
+        // is [radioGardenIntent] — open the site, then type and tune through
+        // the page agent, which already works. A table entry here would look
+        // right in the code and hand the wearer a blank page.
     )
 
     /**

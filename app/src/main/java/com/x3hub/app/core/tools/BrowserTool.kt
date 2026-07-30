@@ -2,6 +2,7 @@ package com.x3hub.app.core.tools
 
 import android.content.Context
 import android.net.Uri
+import com.x3hub.app.core.agent.PageCommands
 import com.x3hub.app.core.bridge.HudPinStore
 import java.net.URLEncoder
 import java.util.Locale
@@ -43,7 +44,19 @@ class BrowserTool(private val context: Context) : AiTapTool {
         val light = arg(args, "mode", "appearance", "theme", "colors", "colours")
             .lowercase().let { it.contains("light") || it.contains("normal") }
 
+        // "open jazz on listennotes" — a subject AND the site to look it up
+        // on. Without this the site name could only arrive inside the query,
+        // so the wearer standing on a podcast directory got a DuckDuckGo page
+        // about podcasts instead of that directory's own results.
+        val site = arg(args, "site", "on", "where", "engine")
+
         val target: String = when {
+            site.isNotBlank() && query.isNotBlank() ->
+                PageCommands.siteSearchUrl(site, query)
+                    // An unknown site is not a failure: searching the web for
+                    // "<query> <site>" is a reasonable answer, and far better
+                    // than refusing because the table has no entry.
+                    ?: searchUrl("$query $site")
             url.isNotBlank() -> resolveUrl(url) ?: return Result.failure(
                 IllegalArgumentException(
                     "Can't open '$url' — only http and https pages work here. " +
@@ -57,6 +70,7 @@ class BrowserTool(private val context: Context) : AiTapTool {
         }
 
         val label = when {
+            site.isNotBlank() && query.isNotBlank() -> shortLabel(query)
             url.isNotBlank() -> hostLabel(target)
             query.isNotBlank() -> shortLabel(query)
             else -> "web"
@@ -334,7 +348,19 @@ class BrowserTool(private val context: Context) : AiTapTool {
             "radiofourall.net" to "radio4all.net",
             "radioforall" to "radio4all.net",
             "radiofourall" to "radio4all.net",
-            "radio4all" to "radio4all.net"
+            "radio4all" to "radio4all.net",
+            // radio.garden puts its name ACROSS the dot, so "radio garden"
+            // closes up to radiogarden and the obvious guess is .com. That
+            // guess is not the site: measured, radiogarden.com answers 410
+            // and redirects to a domain-for-sale listing, which is the blank
+            // window the wearer was looking at. The correction has to apply
+            // even though radiogarden.com is a perfectly well-formed host —
+            // being well-formed is exactly what made it convincing.
+            "radiogarden" to "radio.garden",
+            "radiogarden.com" to "radio.garden",
+            "radiogarden.net" to "radio.garden",
+            "radiogarden.org" to "radio.garden",
+            "listennotes" to "listennotes.com"
         )
 
         /**
