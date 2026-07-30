@@ -831,10 +831,38 @@ class BrowserWindowView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Edge-band insets the CURRENT PAGE declared, in device px. A page sets
+     * `window.__x3EdgeInsets = {top: cssPx, bottom: cssPx}` to say a strip of
+     * its window is fixed chrome — a control bar, a pinned search field —
+     * where a resting cursor means "I am about to click", never "scroll".
+     * Zero for every page that does not declare, which is all of the web;
+     * re-read on each load so the values die with the page that set them.
+     */
+    @Volatile var edgeInsetTopPx: Int = 0
+        private set
+    @Volatile var edgeInsetBottomPx: Int = 0
+        private set
+
+    private fun readEdgeInsets() {
+        runCatching {
+            webView.evaluateJavascript(
+                "(function(){var i=window.__x3EdgeInsets||{};" +
+                    "return (i.top||0)+','+(i.bottom||0);})()"
+            ) { raw ->
+                val parts = raw.trim('"').split(',')
+                val scale = if (currentScale > 0f) currentScale else 1f
+                edgeInsetTopPx = ((parts.getOrNull(0)?.toFloatOrNull() ?: 0f) * scale).toInt()
+                edgeInsetBottomPx = ((parts.getOrNull(1)?.toFloatOrNull() ?: 0f) * scale).toInt()
+            }
+        }
+    }
+
     private fun injectImageFit() {
         runCatching { webView.evaluateJavascript(IMAGE_FIT_JS, null) }
         runCatching { webView.evaluateJavascript(VIEWPORT_FIT_JS, null) }
         runCatching { webView.evaluateJavascript(CANVAS_FIX_JS, null) }
+        readEdgeInsets()
     }
 
     private fun injectInputHooks() {
@@ -1172,6 +1200,31 @@ class BrowserWindowView @JvmOverloads constructor(
                 cleartextFallbackUrl = null
                 Log.i(TAG, "https failed (${error?.description}) — falling back to $fallback")
                 view?.loadUrl(fallback)
+            }
+
+            /**
+             * A certificate that does not cover the bare domain is the
+             * signature failure of an older site: radio4all.net's cert names
+             * only www.radio4all.net, so the handshake dies and the wearer
+             * gets a silently BLACK window — an SSL failure paints nothing
+             * and says nothing. When the mismatch looks exactly like that,
+             * retry once on the www host. The bad certificate is never
+             * accepted; the navigation moves to the host the cert is
+             * actually for. Everything else stays cancelled.
+             */
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: android.webkit.SslErrorHandler?,
+                error: android.net.http.SslError?
+            ) {
+                handler?.cancel()
+                if (error?.primaryError != android.net.http.SslError.SSL_IDMISMATCH) return
+                val u = runCatching { android.net.Uri.parse(error.url) }.getOrNull() ?: return
+                val host = u.host ?: return
+                if (host.startsWith("www.") || host.count { it == '.' } != 1) return
+                val www = u.buildUpon().authority("www.$host").build().toString()
+                Log.i(TAG, "cert for $host mismatched — retrying as $www")
+                view?.post { view.loadUrl(www) }
             }
 
             override fun onScaleChanged(view: WebView?, oldScale: Float, newScale: Float) {

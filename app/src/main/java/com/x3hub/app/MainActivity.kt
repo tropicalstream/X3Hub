@@ -2015,7 +2015,19 @@ class MainActivity : AppCompatActivity() {
         val w = c.browserWindowAt(pt.first, pt.second)?.takeIf { it.isActive } ?: return null
         val loc = IntArray(2)
         w.getLocationOnScreen(loc)
-        val vy = edgeVelocityFor(pt.second - loc[1], (loc[1] + w.height) - pt.second)
+        // A page can declare that a strip of its window is CHROME, not
+        // content — the podcast player's fixed control bar sits exactly in
+        // the bottom edge band, so aiming at play/pause was scrolling the
+        // list underneath. Inside a declared inset the cursor is there to
+        // click, and the band above it still scrolls.
+        val insetB = w.edgeInsetBottomPx
+        val insetT = w.edgeInsetTopPx
+        if (pt.second > loc[1] + w.height - insetB && pt.second <= loc[1] + w.height) return null
+        if (pt.second >= loc[1] && pt.second < loc[1] + insetT) return null
+        val vy = edgeVelocityFor(
+            pt.second - (loc[1] + insetT),
+            (loc[1] + w.height - insetB) - pt.second
+        )
         val vx = edgeVelocityFor(pt.first - loc[0], (loc[0] + w.width) - pt.first)
         // A corner asks for both at once, which is exactly right: it is the
         // only way to reach the far corner of something wider AND taller

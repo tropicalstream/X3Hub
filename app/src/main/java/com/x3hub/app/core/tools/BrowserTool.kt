@@ -371,11 +371,11 @@ class BrowserTool(private val context: Context) : AiTapTool {
         private val SPOKEN_SITES = mapOf(
             // radio4all.net — "4" is heard as "for", occasionally "four",
             // and the wearer may or may not say the ".net" at all.
-            "radioforall.net" to "radio4all.net",
-            "radiofourall.net" to "radio4all.net",
-            "radioforall" to "radio4all.net",
-            "radiofourall" to "radio4all.net",
-            "radio4all" to "radio4all.net",
+            "radioforall.net" to "www.radio4all.net",
+            "radiofourall.net" to "www.radio4all.net",
+            "radioforall" to "www.radio4all.net",
+            "radiofourall" to "www.radio4all.net",
+            "radio4all" to "www.radio4all.net",
             // radio.garden puts its name ACROSS the dot, so "radio garden"
             // closes up to radiogarden and the obvious guess is .com. That
             // guess is not the site: measured, radiogarden.com answers 410
