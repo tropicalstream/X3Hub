@@ -56,7 +56,52 @@ class BrowserWindowView @JvmOverloads constructor(
 
     enum class WindowState { INERT, ACTIVE, MODIFY }
 
-    private val webView = WebView(context)
+    /**
+     * A WebView that will admit how far it can actually pan.
+     *
+     * The engine keeps that number behind `protected
+     * computeHorizontalScrollRange()`, and the only public way to ask —
+     * `canScrollHorizontally()` — is a boolean derived from the CONTAINER
+     * view's own scroll offset rather than from the renderer's. Those two
+     * are not the same thing, and the difference is why this subclass has
+     * to exist: WebView does not override `View.scrollTo`, and unlike
+     * ScrollView that inherited implementation writes mScrollX blind, with
+     * no clamping at all. The renderer meanwhile clamps what it accepts.
+     *
+     * Measured on device: `scrollBy(400, 0)` against a real range of 220
+     * parked the container at 400 while the page stopped at 220, after
+     * which `canScrollHorizontally(1)` reported "nothing to the right" and
+     * the next 180px of LEFTWARD input moved nothing at all — the container
+     * was spending it walking back to a position the page had never left.
+     * Nothing repairs that afterwards; the native->container correction is
+     * suppressed by an equality check that the phantom offset never trips.
+     * So the pan has to clamp against the true maximum BEFORE every write,
+     * and that maximum has to be readable.
+     */
+    private class PannableWebView(context: Context) : WebView(context) {
+        /**
+         * Device px of pan available below and to the right of the origin.
+         *
+         * Read fresh every time rather than cached: the renderer publishes
+         * these asynchronously and they keep growing while images load and
+         * the page reflows, so a maximum captured while a document was half
+         * parsed would strand the wearer part way down a page that had since
+         * got longer.
+         */
+        val maxPanX: Int
+            // WebView overrides computeHorizontalScrollRange but NOT
+            // computeHorizontalScrollExtent, so the extent is still View's
+            // getWidth() — which is exactly the container width the range is
+            // built from, making the subtraction the renderer's own maximum.
+            get() = (computeHorizontalScrollRange() - computeHorizontalScrollExtent())
+                .coerceAtLeast(0)
+
+        val maxPanY: Int
+            get() = (computeVerticalScrollRange() - computeVerticalScrollExtent())
+                .coerceAtLeast(0)
+    }
+
+    private val webView = PannableWebView(context)
 
     /**
      * Border drawables are built once and swapped by reference. A state
@@ -254,20 +299,54 @@ class BrowserWindowView @JvmOverloads constructor(
     /**
      * The cached velocity above is a guess about what the PAGE is doing, and
      * it is only worth deduping against while that guess still holds. Set
-     * whenever the two are known to have diverged — a new document, or the
-     * page telling us it stopped by itself — so the very next request is
+     * whenever the two are known to have diverged — a new document, the page
+     * telling us it stopped by itself, or an axis changing hands between the
+     * page and the view-level pan below — so the very next request is
      * delivered whatever its value.
      */
     private var edgeScrollStale = true
 
+    /**
+     * What the HOST last asked for, before [panOwnsX] / [panOwnsY] withhold
+     * their axis from the page.
+     *
+     * Kept apart from the pair above, which is what the PAGE was last told,
+     * because the two now differ and both are needed. The hand-off is
+     * triggered by the page, asynchronously, and the wearer is quite likely
+     * holding the cursor perfectly still at that moment: MainActivity's
+     * updateEdgeScroll() runs on cursor MOTION and nothing polls, so without
+     * a remembered request the take-over would sit there doing nothing until
+     * the wearer twitched.
+     */
+    private var edgeReqVx = 0f
+    private var edgeReqVy = 0f
+
     /** px/second; positive scrolls right/down. Both 0 stops. */
     fun setEdgeScrollVelocity(vx: Float, vy: Float) {
-        if (!edgeScrollStale && vx == edgeScrollVx && vy == edgeScrollVy) return
-        edgeScrollVx = vx
-        edgeScrollVy = vy
+        edgeReqVx = vx
+        edgeReqVy = vy
+        if (vx == 0f && vy == 0f) {
+            // Leaving the band ends the park, and the page gets first refusal
+            // again next time. It has earned it: a sideways-scrolling table
+            // the wearer has scrolled into view since is a different answer
+            // to the same question, and only the page can see it.
+            panOwnsX = false
+            panOwnsY = false
+        }
+        setViewPanVelocity(if (panOwnsX) vx else 0f, if (panOwnsY) vy else 0f)
+        // An axis the page has given up on is withheld from it. Sending it
+        // anyway would double-drive: the container view's scroll offset is a
+        // MIRROR of the engine's total (visual + layout) viewport offset, so
+        // a host pan and a window.scrollBy on the same axis in the same frame
+        // both land on one number and simply add up.
+        val jsVx = if (panOwnsX) 0f else vx
+        val jsVy = if (panOwnsY) 0f else vy
+        if (!edgeScrollStale && jsVx == edgeScrollVx && jsVy == edgeScrollVy) return
+        edgeScrollVx = jsVx
+        edgeScrollVy = jsVy
         edgeScrollStale = false
         webView.evaluateJavascript(
-            "window.__x3EdgeScroll && window.__x3EdgeScroll($vx,$vy);", null
+            "window.__x3EdgeScroll && window.__x3EdgeScroll($jsVx,$jsVy);", null
         )
     }
 
@@ -285,7 +364,197 @@ class BrowserWindowView @JvmOverloads constructor(
     private fun resetEdgeScrollState() {
         edgeScrollVx = 0f
         edgeScrollVy = 0f
+        edgeReqVx = 0f
+        edgeReqVy = 0f
         edgeScrollStale = true
+        // A new document is a new answer to "can anything scroll this way",
+        // and the pan offsets the loop was clamping against belonged to the
+        // old one. Handing both axes back costs nothing — the page is about
+        // to be asked again from scratch anyway.
+        panOwnsX = false
+        panOwnsY = false
+        setViewPanVelocity(0f, 0f)
+    }
+
+    // ── View-level pan: the travel the page cannot reach ──────────────
+    //
+    // window.scrollBy only ever moves Blink's LAYOUT viewport. On a page the
+    // engine has zoomed out to fit — which useWideViewPort plus the ~53%
+    // initial scale of a base window means nearly all of them — most of the
+    // travel lives in the VISUAL viewport instead, and the only handle on
+    // that from outside the renderer is the container view's own scroll
+    // offset. So there is a whole second scroller stacked on the first, and
+    // JavaScript can neither see it nor drive it.
+    //
+    // Measured on kunstderfuge.com/bach/canons.htm in a 170px window: 416 CSS
+    // px of horizontal travel in total, of which window.scrollBy reaches 57.
+    // The wearer parked in the right band, watched the page twitch and stop,
+    // and reported that pages "never scroll right". The same split hides at
+    // the bottom of every long page: on that document the last 478 CSS px —
+    // more than one whole window height — was unreachable the same way, which
+    // is why "vertical works" was only ever true mid-page.
+    //
+    // This is a FALLBACK and never a replacement. The page is asked first and
+    // keeps every axis it can still move, because a container pan cannot
+    // scroll an inner overflow-x:auto element at all — the compositor's
+    // viewport touches only the inner and outer viewport scroll nodes, so a
+    // wide table inside an article would silently stop scrolling and the
+    // whole page would slide sideways instead. The hand-off happens only when
+    // the page says it has finished with an axis, through the
+    // onEdgeScrollIdle callback it was already sending and the host was
+    // already throwing away.
+
+    private var panOwnsX = false
+    private var panOwnsY = false
+    private var panVx = 0f
+    private var panVy = 0f
+    private var panLastNs = 0L
+
+    /**
+     * Sub-pixel carry. The slowest band speed is 25 px/s, which is under half
+     * a device px per frame at the page scales these windows load at — round
+     * that away every frame and the gentlest end of the ramp is simply a dead
+     * axis.
+     */
+    private var panAccX = 0f
+    private var panAccY = 0f
+    private var panRunning = false
+
+    /**
+     * The page has run an axis out and told us so.
+     *
+     * Take it over ONLY if there is view-level travel left in the direction
+     * the wearer is actually asking for. That condition is what keeps the
+     * page in charge: a document that fits its window has no pan range, so
+     * declining leaves the axis behaving exactly as it does today — including
+     * the page-side deadX/deadY memory, which is keyed on scroll position and
+     * is precisely what lets a wearer reach a sideways-scrolling table by
+     * first scrolling DOWN to it. Claiming an axis we cannot move would latch
+     * that away for the rest of the park and trade one silent failure for
+     * another.
+     */
+    private fun onEdgeAxisExhausted(horiz: Boolean) {
+        // Unconditional and first, because this half was already load-bearing
+        // before there was anything to hand over to: the dedupe above assumes
+        // the page is still running what it was last sent, so once the page
+        // stops itself, the wearer nudging back to the same depth in the band
+        // produces the same quantised number and the request is dropped
+        // before it reaches the bridge.
+        edgeScrollStale = true
+        val v = if (horiz) edgeReqVx else edgeReqVy
+        // A snapshot window is a still bitmap laid over a WebView showing
+        // something else entirely; panning what is underneath would move
+        // nothing the wearer can see.
+        if (v == 0f || isShowingSnapshot) return
+        if (!canPanView(horiz, v)) return
+        if (horiz) panOwnsX = true else panOwnsY = true
+        // Deliver the velocity the host already asked for rather than waiting
+        // to be told it again — see [edgeReqVx].
+        setEdgeScrollVelocity(edgeReqVx, edgeReqVy)
+    }
+
+    /**
+     * The pan has reached its clamp, so give the axis back.
+     *
+     * Handing it straight back instead of keeping it is what stops the
+     * take-over from becoming a one-way trap. Panning re-splits the offset
+     * between the engine's two viewports, so a document scroller that was
+     * maxed out can have room again; and the wearer has moved, so an element
+     * that could not be picked before may now be on screen. If the page has
+     * nothing either it will report idle once more and [onEdgeAxisExhausted]
+     * will decline, which is the honest terminal state: at the true edge of
+     * the content, with the page's own dead-axis memory holding the line.
+     */
+    private fun releasePanAxis(horiz: Boolean) {
+        if (horiz) panOwnsX = false else panOwnsY = false
+        edgeScrollStale = true
+        setEdgeScrollVelocity(edgeReqVx, edgeReqVy)
+    }
+
+    /** Is there container travel left in the direction [v] is asking for? */
+    private fun canPanView(horiz: Boolean, v: Float): Boolean {
+        // canScrollHorizontally() is the obvious question and the wrong one:
+        // it reads the container's own offset and it stops one pixel early.
+        // The real maximum is exact, is what the loop clamps against anyway,
+        // and cannot disagree with itself.
+        val max = if (horiz) webView.maxPanX else webView.maxPanY
+        val cur = if (horiz) webView.scrollX else webView.scrollY
+        return if (v > 0f) cur < max else cur > 0
+    }
+
+    private fun setViewPanVelocity(vx: Float, vy: Float) {
+        panVx = vx
+        panVy = vy
+        if (vx == 0f && vy == 0f) {
+            panRunning = false
+            removeCallbacks(panRunnable)
+            panAccX = 0f
+            panAccY = 0f
+            return
+        }
+        if (!panRunning) {
+            panRunning = true
+            panLastNs = System.nanoTime()
+            postOnAnimation(panRunnable)
+        }
+    }
+
+    /**
+     * One frame of pan. On the UI thread by construction, which is not
+     * optional and is not enforced anywhere else: WebView's thread check
+     * covers its own API surface, and scrollTo is inherited from View, so
+     * driving this from a background thread would corrupt the container's
+     * offset silently rather than throwing.
+     */
+    private val panRunnable = object : Runnable {
+        override fun run() {
+            if (!panRunning) return
+            val now = System.nanoTime()
+            var dt = (now - panLastNs) / 1_000_000_000f
+            panLastNs = now
+            // The same 64ms clamp the page-side loop uses: a window that was
+            // off-screen, or a stall long enough to matter, must not teleport
+            // the page when the frames resume.
+            if (dt > 0.064f) dt = 0.064f
+            if (dt <= 0f) { postOnAnimation(this); return }
+
+            // The band velocity is in CSS px/s because that is what the
+            // page-side loop consumes, and the hand-off has to be invisible.
+            // At a 0.53 page scale the identical number applied to device px
+            // would make the content lurch to nearly twice the speed the
+            // instant the page gave up, which reads as a glitch rather than
+            // as the same scroll continuing.
+            val scale = if (currentScale > 0f) currentScale else 1f
+            panAccX += panVx * scale * dt
+            panAccY += panVy * scale * dt
+            val stepX = panAccX.toInt()
+            val stepY = panAccY.toInt()
+            panAccX -= stepX
+            panAccY -= stepY
+
+            // Read both offsets fresh and write the axis we do NOT own back
+            // unchanged. While the host pans sideways the page may still be
+            // scrolling itself vertically, and the container offset mirrors
+            // that as it happens — writing back a value captured any earlier
+            // would drag the page's own scroll backwards a frame at a time.
+            val curX = webView.scrollX
+            val curY = webView.scrollY
+            val toX = if (panVx != 0f) (curX + stepX).coerceIn(0, webView.maxPanX) else curX
+            val toY = if (panVy != 0f) (curY + stepY).coerceIn(0, webView.maxPanY) else curY
+            // scrollTo rather than scrollBy, and clamped: see PannableWebView
+            // for what one unclamped overshoot costs.
+            if (toX != curX || toY != curY) webView.scrollTo(toX, toY)
+
+            // Per axis, for the same reason the page-side loop counts per
+            // axis: a corner park whose vertical half is still moving would
+            // otherwise keep a finished horizontal half alive indefinitely.
+            if (panVx != 0f && !canPanView(true, panVx)) releasePanAxis(true)
+            if (panVy != 0f && !canPanView(false, panVy)) releasePanAxis(false)
+            // releasePanAxis can stop the loop outright, and it is also the
+            // only thing that can restart it, so re-posting unconditionally
+            // here would leave two callbacks in flight.
+            if (panRunning) postOnAnimation(this)
+        }
     }
 
     // ── Resume-from-snapshot ─────────────────────────────────────────
@@ -545,18 +814,19 @@ class BrowserWindowView @JvmOverloads constructor(
          * The edge-scroll loop gave up on an axis — there is no box in the
          * document that can move that way, or the one it chose refused to.
          *
-         * Forgetting the cached velocity is the load-bearing half: the dedupe
-         * in [setEdgeScrollVelocity] assumes the page is still running what it
-         * was last sent, so once the page stops itself, the wearer nudging
-         * back to the same depth in the band produces the same quantised
-         * number and the request is dropped before it reaches the bridge.
+         * WHICH axis used to be thrown away here, and throwing it away was
+         * the reason "the page never scrolls right" could not be answered
+         * from the host side: the report arrived, said nothing useful, and
+         * the only travel left was travel the page cannot reach. It is now
+         * the trigger for the view-level pan.
          */
         @android.webkit.JavascriptInterface
         fun onEdgeScrollIdle(horiz: Boolean) {
-            // Marking the state stale is what matters: it is what lets a
-            // wearer who nudges back into the band retry at the same speed
-            // instead of the dedupe swallowing the identical request.
-            post { edgeScrollStale = true }
+            // Hopped to the UI thread before anything is touched: this
+            // arrives on the WebView's JavaScript thread, and everything it
+            // reaches — the cached velocities, the pan loop, scrollTo on the
+            // container — is main-thread state with no lock of its own.
+            post { onEdgeAxisExhausted(horiz) }
         }
     }
 
@@ -581,14 +851,28 @@ class BrowserWindowView @JvmOverloads constructor(
     fun defocusField() = webView.evaluateJavascript("window.__x3Defocus && window.__x3Defocus()", null)
 
     /** Probe: run arbitrary JS in the page and log the result. */
-    /** Android-side scroll metrics — the view's own pan range, not the DOM's. */
+    /**
+     * Android-side scroll metrics — the view's own pan range, not the DOM's.
+     *
+     * Reports the true maxima, because the earlier version of this probe
+     * lied and its answer was believed: it panned with an unclamped
+     * scrollBy and then read the offset back, so writing 400 into a range of
+     * 220 reported "400" and enshrined a phantom ~400px pan range as ground
+     * truth. Anything measured through here must be read against maxPan, and
+     * the pan itself is clamped so the two cannot drift apart.
+     */
     fun debugScrollInfo(panDx: Int): String {
-        val before = webView.scrollX
-        if (panDx != 0) webView.scrollBy(panDx, 0)
-        return "viewScrollX $before -> ${webView.scrollX} " +
+        val beforeX = webView.scrollX
+        val beforeY = webView.scrollY
+        if (panDx != 0) {
+            webView.scrollTo((beforeX + panDx).coerceIn(0, webView.maxPanX), beforeY)
+        }
+        return "viewScrollX $beforeX -> ${webView.scrollX}/${webView.maxPanX} " +
+            "viewScrollY $beforeY -> ${webView.scrollY}/${webView.maxPanY} " +
             "canRight=${webView.canScrollHorizontally(1)} " +
             "canLeft=${webView.canScrollHorizontally(-1)} " +
             "canDown=${webView.canScrollVertically(1)} " +
+            "canUp=${webView.canScrollVertically(-1)} " +
             "contentH=${webView.contentHeight} " +
             "scale=$currentScale width=$width"
     }
@@ -886,6 +1170,18 @@ class BrowserWindowView @JvmOverloads constructor(
             override fun onScaleChanged(view: WebView?, oldScale: Float, newScale: Float) {
                 super.onScaleChanged(view, oldScale, newScale)
                 currentScale = newScale
+                // A scale change rewrites the pan range AND how the engine
+                // splits the offset between its layout and visual viewports,
+                // so a document scroller that had nothing left a moment ago
+                // can have room again. Hand the axes back and let the page
+                // re-answer, rather than keep panning against a maximum that
+                // was measured at the old scale.
+                if (panOwnsX || panOwnsY) {
+                    panOwnsX = false
+                    panOwnsY = false
+                    edgeScrollStale = true
+                    setEdgeScrollVelocity(edgeReqVx, edgeReqVy)
+                }
                 if (BuildConfig.DEBUG) Log.i(TAG, "scale $oldScale -> $newScale")
             }
 
@@ -1134,11 +1430,11 @@ class BrowserWindowView @JvmOverloads constructor(
         return super.dispatchTouchEvent(ev)
     }
 
-    /** Scroll the page directly, for hosts that turn trackpad deltas into
-     *  scrolling rather than synthesising a drag. */
-    fun scrollPageBy(dx: Int, dy: Int) {
-        webView.scrollBy(dx, dy)
-    }
+    // scrollPageBy(dx, dy) lived here and had no callers in the app. It was
+    // a bare webView.scrollBy, i.e. the one unclamped view-level scroll this
+    // class exposed, and wiring it up would have reproduced the container /
+    // renderer desync described on PannableWebView. Anything that needs to
+    // pan the view goes through the clamped loop in the edge-scroll section.
 
     /** @return true when there was history to go back to. */
     fun goBack(): Boolean {
@@ -1366,6 +1662,10 @@ class BrowserWindowView @JvmOverloads constructor(
      */
     fun destroy() {
         deactivate()
+        // deactivate() early-returns on a window that was already inert, so
+        // the pan loop needs its own stop: a frame callback that outlived
+        // webView.destroy() would be calling scrollTo on a dead renderer.
+        setViewPanVelocity(0f, 0f)
         onExitRequested = null
         onWindowSizeChanged = null
         requestInterceptor = null
@@ -1707,6 +2007,31 @@ class BrowserWindowView @JvmOverloads constructor(
                 if (t === window) window.scrollBy(dx, dy);
                 else { if (dx) t.scrollLeft += dx; if (dy) t.scrollTop += dy; }
               }
+              // Is the DOCUMENT scroller sitting on its limit right now?
+              //
+              // Worth asking separately from the still-counter below because
+              // the answer is knowable and the wait is expensive: the host
+              // cannot begin the view-level pan that covers the REST of the
+              // page until this axis reports in, and 40 frames is two thirds
+              // of a second of a page that has visibly stopped dead. That
+              // pause, in the middle of a scroll the wearer is holding, is
+              // most of what "it moves a bit and then jams" was.
+              //
+              // Only for `window`. The root's ceiling is scrollWidth minus
+              // innerWidth — the very pair docCan is built on, so trusting it
+              // here adds no new assumption — while an element's dimensions
+              // can be mid-layout and there is no second opinion to be had.
+              // A page using scroll-behavior:smooth is safe: this compares
+              // positions, so an animation still in flight is simply not at
+              // the end yet.
+              function atEnd(t, horiz, pos, v){
+                if (t !== window) return false;
+                if (v < 0) return pos <= 0;
+                var max = horiz
+                  ? document.documentElement.scrollWidth - innerWidth
+                  : document.documentElement.scrollHeight - innerHeight;
+                return pos >= max - 1;
+              }
               // Tell the host an axis has nothing to scroll. Two reasons, and
               // both of them are why this bug survived so long.
               //
@@ -1751,23 +2076,25 @@ class BrowserWindowView @JvmOverloads constructor(
                 // as the wearer waited for it to go right.
                 if (E.vx){
                   var px = posOf(E.tx, true);
-                  if (E.lastX !== null && px === E.lastX){
-                    if (++E.stillX > 40){
-                      E.vx = 0; E.accX = 0; E.tx = null; E.lastX = null;
-                      E.stillX = 0; E.deadX = key(); idle(true);
-                    }
-                  } else E.stillX = 0;
-                  E.lastX = px;
+                  if (atEnd(E.tx, true, px, E.vx) ||
+                      (E.lastX !== null && px === E.lastX && ++E.stillX > 40)){
+                    E.vx = 0; E.accX = 0; E.tx = null; E.lastX = null;
+                    E.stillX = 0; E.deadX = key(); idle(true);
+                  } else {
+                    if (E.lastX === null || px !== E.lastX) E.stillX = 0;
+                    E.lastX = px;
+                  }
                 }
                 if (E.vy){
                   var py = posOf(E.ty, false);
-                  if (E.lastY !== null && py === E.lastY){
-                    if (++E.stillY > 40){
-                      E.vy = 0; E.accY = 0; E.ty = null; E.lastY = null;
-                      E.stillY = 0; E.deadY = key(); idle(false);
-                    }
-                  } else E.stillY = 0;
-                  E.lastY = py;
+                  if (atEnd(E.ty, false, py, E.vy) ||
+                      (E.lastY !== null && py === E.lastY && ++E.stillY > 40)){
+                    E.vy = 0; E.accY = 0; E.ty = null; E.lastY = null;
+                    E.stillY = 0; E.deadY = key(); idle(false);
+                  } else {
+                    if (E.lastY === null || py !== E.lastY) E.stillY = 0;
+                    E.lastY = py;
+                  }
                 }
                 if (!E.vx && !E.vy){ E.raf = 0; return; }
                 E.raf = requestAnimationFrame(step);
