@@ -159,12 +159,50 @@ class BrowserTool(private val context: Context) : AiTapTool {
             val scheme = s.substring(0, schemeEnd).lowercase(Locale.US)
             return if (scheme == "http" || scheme == "https") s else null
         }
+        spokenHost(s)?.let { return "https://$it" }
         // Bare host, with or without a path: "archive.org", "bbc.co.uk/news".
         // The pattern also rejects the slash-less schemes — "javascript:…",
         // "data:…", "intent:…" — since it permits a colon only in front of a
         // port number.
         if (!HOST_RE.matches(s)) return null
         return "https://$s"
+    }
+
+    /**
+     * A domain the wearer SAID, rather than one anybody would type.
+     *
+     * Speech has no full stops and no digits: "radio4all.net" is heard as
+     * "radio for all dot net", which is not a host by any pattern, so it
+     * used to fall through to a web search — the wearer names a site and
+     * gets a results page for it.
+     *
+     * Two steps. Spoken "dot" becomes a real dot and the spaces close up,
+     * which alone rescues anything whose letters survive dictation. Then a
+     * table catches the rest: numbers spoken as words, where "4" reaches us
+     * as "for" or "four" and no rule can tell that from an actual word.
+     *
+     * Only text that LOOKS dictated is touched — it must contain a spoken
+     * "dot" or match the table outright — so "cats" still searches for cats.
+     */
+    private fun spokenHost(raw: String): String? {
+        val lower = raw.lowercase(Locale.US).trim().trimEnd('.', '!', '?')
+        val joined = lower
+            .replace(Regex("\\s+dot\\s+"), ".")
+            .replace(Regex("\\s+"), "")
+        SPOKEN_SITES[joined]?.let { return it }
+        // No spoken "dot" means this was never a dictated address; leave it
+        // to the search path rather than guessing a host out of prose.
+        if (!Regex("\\s+dot\\s+").containsMatchIn(lower)) return null
+        if (!HOST_RE.matches(joined)) return null
+        // The last part has to be a REAL suffix, because "dot" is an
+        // ordinary English word and the shape alone proves nothing. Simulated
+        // over the phrasings a wearer actually produces, the bare pattern
+        // turned "what is the dot product" into whatisthe.product and
+        // "podcasts about dot net framework" into podcastsabout.netframework
+        // — both perfectly valid-looking hosts, both nonsense, and both
+        // stealing a question that should have been a search.
+        val tld = joined.substringAfterLast('.').substringBefore('/').substringBefore(':')
+        return joined.takeIf { tld in SPOKEN_TLDS }
     }
 
     private fun searchUrl(query: String): String =
@@ -283,6 +321,37 @@ class BrowserTool(private val context: Context) : AiTapTool {
          * and a real TLD, so free-text queries ("cuttlefish facts") fall
          * through to search instead of becoming https://cuttlefish facts.
          */
+        /**
+         * Dictated forms that no amount of pattern-matching can repair,
+         * because the mangling is a real English word. Keyed on the text
+         * after "dot" has been turned into a dot and the spaces closed up,
+         * so one entry covers every spacing the transcriber produces.
+         */
+        private val SPOKEN_SITES = mapOf(
+            // radio4all.net — "4" is heard as "for", occasionally "four",
+            // and the wearer may or may not say the ".net" at all.
+            "radioforall.net" to "radio4all.net",
+            "radiofourall.net" to "radio4all.net",
+            "radioforall" to "radio4all.net",
+            "radiofourall" to "radio4all.net",
+            "radio4all" to "radio4all.net"
+        )
+
+        /**
+         * Suffixes a dictated address may end in. A allowlist rather than a
+         * pattern because "dot" is a common English word and the shape of a
+         * host proves nothing on its own — see [spokenHost]. Deliberately
+         * short: a miss costs one web search, a false positive costs the
+         * wearer their answer.
+         */
+        private val SPOKEN_TLDS = setOf(
+            "com", "net", "org", "edu", "gov", "mil", "int",
+            "io", "ai", "app", "dev", "co", "me", "tv", "fm", "cc", "xyz",
+            "info", "biz", "news", "radio", "garden", "live", "media",
+            "uk", "us", "ca", "au", "de", "fr", "es", "it", "nl", "se",
+            "no", "fi", "dk", "pl", "ru", "jp", "cn", "in", "br", "mx", "nz"
+        )
+
         private val HOST_RE = Regex(
             "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}(?::\\d{1,5})?(?:/\\S*)?$",
             RegexOption.IGNORE_CASE
