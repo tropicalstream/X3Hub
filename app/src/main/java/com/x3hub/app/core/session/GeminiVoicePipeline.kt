@@ -800,9 +800,19 @@ class GeminiVoicePipeline(context: Context) {
                 if (!serverAudioStreamPaused &&
                     idle.shouldFlushPendingAudio(PENDING_AUDIO_FLUSH_MS)
                 ) {
-                    pauseServerAudioStream(
-                        "pending user turn idle for ${idle.idleForMs}ms"
-                    )
+                    if (pauseServerAudioStream(
+                            "pending user turn idle for ${idle.idleForMs}ms"
+                        )
+                    ) {
+                        // The maybe-speech that resumed the stream produced
+                        // nothing before it went quiet again. Take back the
+                        // waiting latch it set, or a noisy room re-arms the
+                        // response timeout forever and the session cannot
+                        // die. Confirmed turns are unaffected — a
+                        // transcription or model output clears the tentative
+                        // mark before this can fire.
+                        idlePolicy.onTentativeFizzled(now)
+                    }
                 }
                 if (idle.shouldEnd) {
                     Log.i(
@@ -882,7 +892,14 @@ class GeminiVoicePipeline(context: Context) {
                         }
                         if (!modelSpeakingNow && norm >= USER_STREAM_RESUME_LEVEL) {
                             resumeServerAudioStream("local speech detected")
-                            noteUserActivity()
+                            // TENTATIVE: a single frame over the threshold is
+                            // a maybe, not a turn. It counts fully only once
+                            // a transcription or the model's reply confirms
+                            // it; if the stream just goes quiet again, the
+                            // fizzle in the watchdog puts the state back.
+                            idlePolicy.onTentativeUserActivity(
+                                SystemClock.uptimeMillis()
+                            )
                             for (prefix in pausedPrefix) {
                                 liveSession?.sendAudioChunkPcm16(
                                     prefix, prefix.size, SAMPLE_RATE_HZ
@@ -900,8 +917,12 @@ class GeminiVoicePipeline(context: Context) {
                     // A mic level clearly above ambient counts as the user
                     // starting/continuing a turn. Do not mistake Gemini's own
                     // speaker echo for a follow-up while playback is active.
+                    // Tentative for the same reason as the resume above: a
+                    // level is a maybe, and only a transcription or a reply
+                    // makes it a turn. Left as a hard latch, this was the
+                    // other half of the noisy-room keep-alive.
                     if (norm >= USER_SPEECH_LEVEL && !modelSpeakingNow) {
-                        noteUserActivity()
+                        idlePolicy.onTentativeUserActivity(SystemClock.uptimeMillis())
                     }
                     // Synchronous barge-in: cut Gemini off HERE, on the
                     // device, rather than waiting for the server's verdict to

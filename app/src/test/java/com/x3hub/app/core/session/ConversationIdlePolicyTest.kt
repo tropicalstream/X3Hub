@@ -125,6 +125,65 @@ class ConversationIdlePolicyTest {
         assertFalse(policy.snapshot(20_000).shouldFlushPendingAudio(afterMs = 1_000))
     }
 
+    @Test
+    fun phantomSpeechBlipsCannotHoldTheSessionOpen() {
+        // The measured failure: seventeen "local speech detected" resumes in
+        // ninety-five seconds, zero transcriptions, and a session that could
+        // not die because each blip re-armed the 20s response window.
+        val policy = policy()
+        policy.reset(0)
+        policy.onUserActivity(500)
+        policy.onModelActivity(1_000)
+
+        policy.onTentativeUserActivity(2_000)   // a door, a breath, the radio
+        policy.onTentativeFizzled(3_200)        // stream idle again, nothing said
+
+        val snapshot = policy.snapshot(8_300)
+        assertEquals(5_000, snapshot.timeoutMs)  // short clock, not response grace
+        assertTrue(snapshot.shouldEnd)
+    }
+
+    @Test
+    fun tentativeSpeechConfirmedByTranscriptionKeepsResponseGrace() {
+        val policy = policy()
+        policy.reset(0)
+
+        policy.onTentativeUserActivity(1_000)
+        policy.onUserActivity(1_400)            // transcription arrived — real turn
+        policy.onTentativeFizzled(2_600)        // late fizzle must not roll it back
+
+        val snapshot = policy.snapshot(10_000)
+        assertEquals(20_000, snapshot.timeoutMs)
+        assertFalse(snapshot.shouldEnd)
+    }
+
+    @Test
+    fun blipDuringAGenuinelyPendingTurnLeavesItPending() {
+        val policy = policy()
+        policy.reset(0)
+        policy.onUserActivity(1_000)            // real question, answer pending
+
+        policy.onTentativeUserActivity(3_000)
+        policy.onTentativeFizzled(4_200)
+
+        assertTrue(policy.snapshot(4_300).awaitingModelResponse)
+    }
+
+    @Test
+    fun blipOnAFreshSessionPreservesTheOpeningGrace() {
+        val policy = policy()
+        policy.reset(0)
+
+        policy.onTentativeUserActivity(1_000)
+        policy.onTentativeFizzled(2_200)
+
+        // heardUser must be restored, or a door slam would cut the wearer's
+        // 20s to form their first question down to the 5s idle clock.
+        val snapshot = policy.snapshot(9_000)
+        assertEquals(20_000, snapshot.timeoutMs)
+        assertFalse(snapshot.shouldEnd)
+    }
+
     private fun policy() = ConversationIdlePolicy(
         openingTimeoutMs = 20_000,
         idleTimeoutMs = 5_000,
