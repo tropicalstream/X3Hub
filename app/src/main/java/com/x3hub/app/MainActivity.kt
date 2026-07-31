@@ -119,6 +119,14 @@ class MainActivity : AppCompatActivity() {
     private var droppedFirstDelta = false
     private val cursorGain = 0.45f
     private val dimPullGesture = DimPullGesture()
+
+    /**
+     * The way OUT, as the mirror of the way in: the same tested recognizer,
+     * fed the upward axis. A separate instance because entry and exit can
+     * never share progress — a pull down that dims must not leave momentum
+     * a later pull up could inherit.
+     */
+    private val dimExitGesture = DimPullGesture()
     private val hideCursorRunnable = Runnable { setCursorVisible(false) }
 
     // ── Right-arm tap state ──────────────────────────────────────────
@@ -2358,6 +2366,7 @@ class MainActivity : AppCompatActivity() {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 dimPullGesture.beginGesture()
+                dimExitGesture.beginGesture()
                 droppedFirstDelta = false
                 lastTrackpadX = ev.x
                 lastTrackpadY = ev.y
@@ -2416,6 +2425,7 @@ class MainActivity : AppCompatActivity() {
                 val moved = rightArmTouchMoved
                 rightArmTouchTracking = false
                 dimPullGesture.endGesture()
+                dimExitGesture.endGesture()
                 if (!tracking) return
                 if (moved) {
                     maybeHandleEdgePull(ev)
@@ -2428,6 +2438,7 @@ class MainActivity : AppCompatActivity() {
             }
             MotionEvent.ACTION_CANCEL -> {
                 dimPullGesture.endGesture()
+                dimExitGesture.endGesture()
                 rightArmTouchTracking = false
             }
         }
@@ -2635,9 +2646,14 @@ class MainActivity : AppCompatActivity() {
     private fun moveCursorBy(dx: Float, dy: Float, eventTimeMs: Long) {
         // Dim means the pad is not a pointer: there is nothing to point at,
         // and a cursor that woke on the first accidental brush would light
-        // the projector the wearer just turned off. Taps stay live — they
-        // are dim's only controls — this drops only the slides.
-        if (dimController?.isDimmed == true) return
+        // the projector the wearer just turned off. The slides are dropped
+        // before any cursor work — but they still feed ONE listener, the
+        // exit gesture, which is how a swipe wakes the display without a
+        // cursor ever showing while it is black.
+        if (dimController?.isDimmed == true) {
+            maybeHandleDimExitPull(dx, dy, eventTimeMs)
+            return
+        }
         // Aiming at a key IS using the keyboard. Only key presses used to
         // reset the idle timer, so hunting for a letter by sliding — which
         // is the whole interaction on a trackpad — could time the keyboard
@@ -2708,6 +2724,32 @@ class MainActivity : AppCompatActivity() {
         if (trigger != null) {
             Log.i(TAG, "Bottom-edge ${trigger.logLabel} — dimming")
             dim.enter()
+        }
+    }
+
+    /**
+     * Exit dim by the mirror of the way in: the same tested recognizer,
+     * fed the upward axis. There is no cursor and no boundary while dimmed
+     * — the display itself is the edge — so the whole upward delta counts
+     * as overscroll, and the recognizer's own thresholds (a sustained pull
+     * or a decisive flick, per physical touch, vertically dominant) are
+     * what keep a stray brush from lighting the projector. Always eligible:
+     * in dim, nothing else owns the pad by construction.
+     */
+    private fun maybeHandleDimExitPull(dx: Float, dy: Float, eventTimeMs: Long) {
+        val dim = dimController ?: return
+        if (!dim.isDimmed) return
+        val up = -dy
+        val trigger = dimExitGesture.update(
+            deltaX = dx,
+            deltaY = up,
+            overscrollPx = up.coerceAtLeast(0f),
+            eligible = true,
+            nowMs = eventTimeMs
+        )
+        if (trigger != null) {
+            Log.i(TAG, "Upward ${trigger.logLabel} — waking the display")
+            dim.exit()
         }
     }
 
