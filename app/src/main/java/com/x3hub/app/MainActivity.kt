@@ -277,8 +277,15 @@ class MainActivity : AppCompatActivity() {
                     // Chained rather than nested in the script: the page the
                     // script sends us to is a fresh document, so the follow-up
                     // has to be armed here, on this side of the navigation.
+                    // Armed against a DOCUMENT CHANGE, not the next finish —
+                    // a duplicate finish of outcome.url (two loads race when
+                    // a voice errand re-opens a page that is already up)
+                    // consumed the plain arming and the follow-up ran on the
+                    // wrong document.
                     outcome.thenJs?.let { after ->
-                        window.runAfterNextPageFinish { window.evaluateJavascript(after) }
+                        window.runAfterPageChangeFrom(outcome.url) {
+                            window.evaluateJavascript(after)
+                        }
                     }
                     window.evaluateJavascript(outcome.js)
                 }
@@ -334,9 +341,18 @@ class MainActivity : AppCompatActivity() {
      * is immediately audible rather than silent.
      */
     private fun pickedWindow(): BrowserWindowView? {
-        val all = hudPinBoardController?.browserWindows().orEmpty()
+        val c = hudPinBoardController ?: return null
+        val all = c.browserWindows()
         return all.firstOrNull { it.isActive }
             ?: all.singleOrNull()
+            // The window most recently ASKED FOR through the store — the
+            // step recency cannot cover, because a re-opened pin reuses its
+            // window without touching it. "Open bandcamp… read it to me"
+            // must mean the bandcamp window, not whichever window the
+            // wearer's hand last brushed.
+            ?: HudPinStore.lastAddedPinId?.let { id ->
+                c.browserWindowEntries().firstOrNull { it.first == id }?.second
+            }
             ?: all.maxByOrNull { it.lastFocusMs }
     }
 
@@ -1739,12 +1755,17 @@ class MainActivity : AppCompatActivity() {
 
         AgentTaskBridge.setListener { task ->
             uiHandler.post {
-                // The ACTIVE window if there is one, else the only window —
-                // saying "play the first result" right after opening a page
-                // should not also require clicking it first.
+                // The SAME resolution every other "this page" caller uses.
+                // This listener kept a private older copy of the rule
+                // (active-else-only) and it failed live: a voice-opened
+                // window is INERT by design, so with two windows on the
+                // board the dispatch told a wearer looking at the open page
+                // to open a page. pickedWindow knows the window most
+                // recently asked for through the store, which is exactly
+                // the one an orchestrated task that arrives 300ms after
+                // open_browser is about.
                 val c = hudPinBoardController
-                val target = c?.browserWindows()?.firstOrNull { it.isActive }
-                    ?: c?.browserWindows()?.singleOrNull()
+                val target = pickedWindow()
                 if (target == null) {
                     showNotice("Open a page first, then give the agent a task.")
                 } else {

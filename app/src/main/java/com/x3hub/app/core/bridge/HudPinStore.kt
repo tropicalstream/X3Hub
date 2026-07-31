@@ -267,9 +267,11 @@ object HudPinStore {
                     createdAt = existing.createdAt
                 )
                 persist(next)
+                lastAddedPinId = existing.id
             } else {
                 if (current.size >= MAX_PINS) return false
                 persist(current + pin)
+                lastAddedPinId = pin.id
             }
         }
         notifyListeners()
@@ -341,6 +343,21 @@ object HudPinStore {
         notifyListeners()
         return removedLabel
     }
+
+    /**
+     * The pin most recently written through [add], new or replaced.
+     *
+     * This is the missing answer to "which window did the wearer just ask
+     * for". A voice-opened window is INERT by design, so with two windows on
+     * the board neither is active and selection by activity fails — measured
+     * live: open_browser put bandcamp up, page_agent dispatched 300ms later,
+     * and the listener told a wearer looking at the page to open a page.
+     * Recency of focus cannot answer either, because a RE-opened pin reuses
+     * its window without touching it. The store is the one place every open
+     * passes through, so the store remembers.
+     */
+    @Volatile var lastAddedPinId: String? = null
+        private set
 
     /** Persist a manual move (overlay-space px). */
     fun updatePosition(id: String, x: Int, y: Int) {

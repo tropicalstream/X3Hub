@@ -408,8 +408,30 @@ object PageCommands {
         RegexOption.IGNORE_CASE
     )
 
+    /**
+     * Words that mean the wearer's own bandcamp things, and words that mean
+     * make sound. Component checks rather than whole-sentence patterns,
+     * because the sentence now often comes from the ORCHESTRATOR, which
+     * phrases the same errand a hundred ways: "open my purchases and play
+     * them" matched neither anchored pattern (BC_PURCHASES requires the
+     * sentence to END at the noun), fell through to the LLM agent, and the
+     * agent then could not press bandcamp's hover-revealed play control —
+     * watched live, with the working native flow sitting right here.
+     */
+    private val BC_MINE = Regex(
+        "\\b(?:purchases|collection|library|my music|" +
+            "(?:music|albums?|things|stuff|what|everything|anything) i (?:own|bought|have bought))\\b",
+        RegexOption.IGNORE_CASE
+    )
+    private val BC_PLAY_VERB = Regex(
+        "\\b(?:play|shuffle|randomi[sz]e|listen|put on|start)\\b",
+        RegexOption.IGNORE_CASE
+    )
+
     /** Bandcamp-only intents, or null to fall through to normal routing. */
     private fun bandcampIntent(text: String): Outcome? = when {
+        // The exact shapes the double-tap voice path has always used keep
+        // first claim, so nothing a wearer says by habit changes meaning.
         BC_PURCHASES.matches(text) -> Outcome.NavigateThenScript(
             url = BC_HOME,
             notice = "Your Bandcamp collection",
@@ -420,6 +442,21 @@ object PageCommands {
             notice = "Shuffling your collection",
             js = BC_SHUFFLE_JS,
             thenJs = BC_PRESS_PLAY_JS
+        )
+        // Any mention of the wearer's own things plus a make-sound verb is
+        // the shuffle-play flow, however the sentence is arranged; their
+        // things WITHOUT a sound verb just opens the collection.
+        BC_MINE.containsMatchIn(text) && BC_PLAY_VERB.containsMatchIn(text) ->
+            Outcome.NavigateThenScript(
+                url = BC_HOME,
+                notice = "Shuffling your collection",
+                js = BC_SHUFFLE_JS,
+                thenJs = BC_PRESS_PLAY_JS
+            )
+        BC_MINE.containsMatchIn(text) -> Outcome.NavigateThenScript(
+            url = BC_HOME,
+            notice = "Your Bandcamp collection",
+            js = BC_GO_TO_COLLECTION_JS
         )
         else -> null
     }

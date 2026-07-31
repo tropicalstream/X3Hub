@@ -972,6 +972,36 @@ class BrowserWindowView @JvmOverloads constructor(
     }
 
     /**
+     * Run [block] once, after the next page finish whose URL is a DIFFERENT
+     * document than [notUrl] — surviving duplicate finishes of the same one.
+     *
+     * "Next finish" is the wrong contract when two loads of one URL are in
+     * flight, and that happens every time a voice errand re-opens a page
+     * that is already up: open_browser reloads it, the dispatcher loads it
+     * again, and the chained follow-up armed for "the page my script
+     * navigates to" was consumed by the duplicate instead — measured live,
+     * the press-play step fired on the bandcamp HOMEPAGE while the album it
+     * was meant for loaded with nothing armed, and the wearer got a
+     * shuffled album sitting silent at 0:00. [maxFinishes] bounds the wait
+     * so an armed block cannot outlive its errand.
+     */
+    fun runAfterPageChangeFrom(notUrl: String, maxFinishes: Int = 6, block: (String?) -> Unit) {
+        fun norm(u: String?) = (u ?: "").substringBefore('#').trimEnd('/')
+        val skip = norm(notUrl)
+        var remaining = maxFinishes
+        fun arm() {
+            pageFinishedOnce.add { url ->
+                when {
+                    norm(url) != skip -> block(url)
+                    --remaining > 0 -> arm()
+                    else -> Unit
+                }
+            }
+        }
+        arm()
+    }
+
+    /**
      * The page's readable text, for the page agent. innerText rather than
      * textContent on purpose: it respects display:none and collapses the
      * whitespace, so navigation furniture and hidden menus do not drown the
