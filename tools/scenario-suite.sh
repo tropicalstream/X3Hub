@@ -13,10 +13,14 @@ probe() { # probe <host> <js-with-plain-quotes>
   sleep 4
   adb logcat -d 2>/dev/null | grep "eval ->" | tail -1
 }
-audio_mark() { adb shell dumpsys audio 2>/dev/null | grep -cE "player piid.*state:started"; }
-audio_new() { # audio_new <prev-count> — any NEW started lines since?
-  local now=$(audio_mark)
-  [ "$now" -gt "$1" ]
+# Is the app AUDIBLY playing right now? The focus stack is the truthful
+# witness: Chromium takes GAIN when media starts and abandons it on pause,
+# so "focus held, no loss" means sound. Counting "state:started" player
+# lines was not truthful — dead players linger and unrelated ones churn,
+# and the count produced two false FAILs in one run while the audio played.
+audio_playing() {
+  adb shell dumpsys audio 2>/dev/null |
+    grep "pack: com.x3hub.app" | grep -q "gain: GAIN.*loss: none"
 }
 result() { R+=("$1 $2"); echo "»» $1 $2"; }
 
@@ -35,7 +39,6 @@ OUT=$(probe x3hub.local 'JSON.stringify({tiles:document.querySelectorAll(".tile"
 echo "$OUT" | grep -qE 'tiles.{0,4}(1[5-9]|2[0-9])' && result PASS "S1 player search: tiles+bylines" || result FAIL "S1: $OUT"
 
 echo "== S2: player episode playback (hands-free) =="
-M=$(audio_mark)
 adb shell "am broadcast -a $B -p $P -e on x3hub.local -e js 'openPod(0); 1'" >/dev/null 2>&1; sleep 8
 adb shell "am broadcast -a $B -p $P -e on x3hub.local -e js 'playEp(0); 1'" >/dev/null 2>&1; sleep 10
 OUT=$(probe x3hub.local 'var a=document.getElementById("au"); "paused="+a.paused+" t="+Math.round(a.currentTime)')
@@ -49,19 +52,18 @@ echo "$OUT" | grep -qi 'StarTalk Radio.*Tyson' && result PASS "S3 StarTalk Radio
 
 echo "== S4: bandcamp shuffle-play (targeted dispatch) =="
 bc "-e url 'https://bandcamp.com'"; sleep 14
-M=$(audio_mark)
 adb shell "am broadcast -a $B -p $P -e on bandcamp -e task 'play my purchases'" >/dev/null 2>&1; sleep 55
 adb logcat -c
 adb shell "am broadcast -a $B -p $P -e on bandcamp -e scrollinfo 0" >/dev/null 2>&1; sleep 3
 URL=$(adb logcat -d | grep "DEBUG scrollinfo" | tail -1)
 if echo "$URL" | grep -qE 'scrollinfo\[https://[a-z0-9-]+\.(bandcam|bandcamp)'; then
-  audio_new "$M" && result PASS "S4 shuffle: album + NEW audio" || result FAIL "S4 album loaded but no new audio: $URL"
+  audio_playing && result PASS "S4 shuffle: album + audio playing" || result FAIL "S4 album loaded but no audio: $URL"
 else result FAIL "S4 wrong page: $URL"; fi
 
 echo "== S5: named artist from purchases =="
 adb logcat -c
 adb shell "am broadcast -a $B -p $P -e on bandcamp -e task 'play 8 bit weapon from my purchases'" >/dev/null 2>&1
-M=$(audio_mark); sleep 50
+sleep 50
 adb logcat -d | grep -q "X3BC playing 8 Bit Weapon" && result PASS "S5 artist match logged" || result INFO "S5 match log rotated (S5b is authoritative)"
 adb logcat -c
 adb shell "am broadcast -a $B -p $P -e on 8bitweapon -e scrollinfo 0" >/dev/null 2>&1; sleep 3
@@ -74,13 +76,11 @@ adb shell "am broadcast -a $B -p $P -e on bandcamp -e scrollinfo 0" >/dev/null 2
 URL=$(adb logcat -d | grep "DEBUG scrollinfo" | tail -1)
 echo "$URL" | grep -qE "bandcamp\.com/[A-Za-z0-9_-]+\]" && result PASS "S6 collection page" || result FAIL "S6: $URL"
 
-echo "== S7: radio.garden native tune (time-correlated) =="
+echo "== S7: radio.garden native tune =="
 bc "-e url 'https://radio.garden'"; sleep 18
-TUNE_T=$(adb shell date '+%H:%M' | tr -d '\r')
 adb shell "am broadcast -a $B -p $P -e on radio.garden -e task 'play kpfa'" >/dev/null 2>&1; sleep 35
-LAST=$(adb shell dumpsys audio 2>/dev/null | grep -iE "player piid.*state:started" | tail -1)
-echo "$LAST" | grep -q "DeviceId:3" && result PASS "S7 tune: media player started ($LAST)" || result FAIL "S7: $LAST"
-adb shell "am broadcast -a $B -p $P -e on radio.garden -e task 'stop'" >/dev/null 2>&1
+audio_playing && result PASS "S7 tune: app holds media focus" || result FAIL "S7 no media focus after tune"
+adb shell "am broadcast -a $B -p $P -e on radio.garden -e js 'document.querySelectorAll(\"audio,video\").forEach(function(a){a.pause()}); 1'" >/dev/null 2>&1
 
 echo "== S8: radio4all www retry renders =="
 for i in 1 2; do bc "-e winact close"; sleep 2; done
