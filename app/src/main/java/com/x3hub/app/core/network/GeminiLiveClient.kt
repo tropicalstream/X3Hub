@@ -87,7 +87,13 @@ class GeminiLiveClient(
                 "you run their whole errand end to end by CHAINING tools. 'Play some jazz " +
                 "podcasts' = open_browser(site podcasts, query jazz) then page_agent('play " +
                 "the first episode'). 'Find X on that page and play it' = page_agent with " +
-                "the whole errand in one task. After dispatching page_agent say only that " +
+                "the whole errand in one task. The agent CANNOT hear the user and knows " +
+                "nothing you do not write in the task — so spell out names fully, with " +
+                "the host or artist when you know it: 'play the newest episode of " +
+                "StarTalk Radio, the one by Neil deGrasse Tyson' finds the right show " +
+                "among several with near-identical names; 'play the newest star talk' " +
+                "once played a sound-alike that had been dead for years. " +
+                "After dispatching page_agent say only that " +
                 "the agent is on it — the agent works for up to a minute, so WAIT; never " +
                 "invent its outcome. Its result then arrives as a message starting " +
                 "'[PAGE AGENT FINISHED]' or '[PAGE AGENT FAILED]': relay that outcome in " +

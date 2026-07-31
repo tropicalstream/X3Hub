@@ -35,9 +35,17 @@
   .tile { border:1px solid #2a3a42; border-radius:8px; overflow:hidden; background:#0b0f12; }
   .tile img { width:100%; aspect-ratio:1; display:block; background:#111; }
   .tile .t {
-    font-size:11.5px; line-height:1.25; padding:4px 5px 6px; color:#dfe;
+    font-size:11.5px; line-height:1.25; padding:4px 5px 0; color:#dfe;
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
-    min-height:33px;
+    min-height:29px;
+  }
+  /* The HOST, because the show name alone is ambiguous in the worst way:
+     several unrelated podcasts render as the identical two words, and the
+     one measured wrong pick played a show dead since 2021. The byline is
+     what tells them apart — for the wearer and for the page agent alike. */
+  .tile .a {
+    font-size:10px; line-height:1.2; padding:1px 5px 5px; color:#8aa;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
   /* Episode list */
   #eps { display:none; }
@@ -148,7 +156,8 @@ function doSearch(){
       g.innerHTML = results.map(function(r, i){
         return '<div class="tile" onclick="openPod(' + i + ')">' +
           '<img loading="lazy" src="' + esc(r.artworkUrl100 || '') + '" alt="">' +
-          '<div class="t">' + esc(r.collectionName) + '</div></div>';
+          '<div class="t">' + esc(r.collectionName) + '</div>' +
+          '<div class="a">' + esc(r.artistName || '') + '</div></div>';
       }).join('');
       status(results.length ? results.length + ' podcasts' : 'Nothing found for "' + q + '"');
     },
