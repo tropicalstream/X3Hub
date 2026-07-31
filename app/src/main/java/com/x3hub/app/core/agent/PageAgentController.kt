@@ -41,7 +41,15 @@ import org.json.JSONObject
 class PageAgentController(
     private val context: Context,
     private val window: BrowserWindowView,
-    private val showNotice: (String) -> Unit
+    private val showNotice: (String) -> Unit,
+    /**
+     * Offered the agent's outcome before it is spoken. Returning true means
+     * an orchestrator took it — a live Gemini session that will relay the
+     * result in its own voice and decide the next step — so the agent's
+     * standalone TTS stays quiet instead of talking over it. Null or false
+     * keeps the original behaviour: the agent speaks for itself.
+     */
+    private val onResult: ((message: String, ok: Boolean) -> Boolean)? = null
 ) {
 
     private val main = Handler(Looper.getMainLooper())
@@ -382,8 +390,12 @@ class PageAgentController(
             // Shown AND spoken. The notice strip holds about one line, and
             // the window is too small to read a paragraph off — an answer
             // that is only displayed is an answer the wearer never gets.
+            // When an orchestrating session is live it does the speaking,
+            // in one voice, and can chain the wearer's next step.
             showNotice(message)
-            AgentSpeech.speak(context, message)
+            if (onResult?.invoke(message, true) != true) {
+                AgentSpeech.speak(context, message)
+            }
         }
 
         @JavascriptInterface
@@ -395,6 +407,7 @@ class PageAgentController(
             clearWatchdog()
             Log.w(TAG, "agent error: $message")
             showNotice("Agent: ${message.take(90)}")
+            onResult?.invoke(message, false)
         }
 
         @JavascriptInterface

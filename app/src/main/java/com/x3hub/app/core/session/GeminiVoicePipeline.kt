@@ -90,6 +90,24 @@ class GeminiVoicePipeline(context: Context) {
         responseTimeoutMs = RESPONSE_WAIT_MS
     )
     private val toolCallsInFlight = AtomicInteger(0)
+
+    /**
+     * Uptime deadline until which the session must stay open for work
+     * running OUTSIDE it — a page-agent errand dispatched by a tool call
+     * returns immediately, the model acknowledges, the turn completes, and
+     * the 5s between-turn clock would then close the session under an
+     * errand that takes half a minute. A deadline rather than a flag: the
+     * holder can crash without leaking an immortal session, because the
+     * hold expires on its own.
+     */
+    private val externalWorkDeadline = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /** Keep the session alive for [ms] more; 0 releases the hold early. */
+    fun holdSessionOpen(ms: Long) {
+        externalWorkDeadline.set(
+            if (ms <= 0L) 0L else SystemClock.uptimeMillis() + ms.coerceAtMost(120_000L)
+        )
+    }
     private val toolTurnCoordinator = ToolTurnCoordinator()
     private val bufferedToolAudioLock = Any()
     private val bufferedToolAudio = ArrayList<BufferedModelAudio>()
@@ -791,7 +809,8 @@ class GeminiVoicePipeline(context: Context) {
                 if (!liveSessionReady || !isSessionEpochCurrent(epoch)) continue
                 val now = SystemClock.uptimeMillis()
                 val busy = toolCallsInFlight.get() > 0 ||
-                    audioPlayer.isActivelySpeaking(windowMs = 600L)
+                    audioPlayer.isActivelySpeaking(windowMs = 600L) ||
+                    now < externalWorkDeadline.get()
                 if (busy) {
                     idlePolicy.onConversationActivity(now)
                     continue

@@ -780,7 +780,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun agentFor(window: BrowserWindowView): PageAgentController =
         pageAgents.getOrPut(window) {
-            PageAgentController(applicationContext, window) { msg -> showNotice(msg) }
+            PageAgentController(
+                applicationContext,
+                window,
+                showNotice = { msg -> showNotice(msg) },
+                onResult = { message, ok ->
+                    // Live session = the wearer is mid-conversation with the
+                    // orchestrator; the result goes INTO that conversation so
+                    // one voice narrates and the next step can follow. The
+                    // hold is released either way — the errand is over.
+                    val live = HudStateBridge.current().phase !=
+                        HudStateBridge.VoicePhase.IDLE
+                    runCatching { voiceServiceApi?.holdSessionOpen(0L) }
+                    if (live) {
+                        runCatching {
+                            voiceServiceApi?.sendSessionNote(
+                                "[PAGE AGENT ${if (ok) "FINISHED" else "FAILED"}] " +
+                                    message.take(500) +
+                                    " — relay this to the user in one short sentence" +
+                                    if (ok) ", then continue their errand if steps remain."
+                                    else ", and suggest what to try instead."
+                            )
+                        }
+                    }
+                    live
+                }
+            )
         }
     private var dimController: DimController? = null
     /** The window currently in modify mode, so a swipe knows what to resize. */
@@ -1724,6 +1749,15 @@ class MainActivity : AppCompatActivity() {
                     if (!target.isActive) {
                         c?.browserWindows()?.forEach { if (it !== target) it.deactivate() }
                         target.activate()
+                    }
+                    // A task dispatched mid-session is an errand the session
+                    // is waiting on: the tool reply comes back instantly, the
+                    // turn completes, and the 5s between-turn clock would
+                    // close the conversation under a 30-second errand. The
+                    // hold is a deadline, not a flag — a wedged agent costs
+                    // at most its own timeout, and completion releases it.
+                    if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) {
+                        runCatching { voiceServiceApi?.holdSessionOpen(90_000L) }
                     }
                     // activate() already wakes a still, but the agent needs
                     // the DOM in place before it plans against it.

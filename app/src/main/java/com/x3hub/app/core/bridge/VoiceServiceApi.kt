@@ -15,6 +15,21 @@ interface VoiceServiceApi {
     fun shutdownVoice()
 
     /**
+     * Keep the session alive while work OUTSIDE it runs on the wearer's
+     * behalf — a page-agent errand takes 15-60 seconds, and the between-turn
+     * idle clock is five. Pass 0 to release the hold early; every hold has a
+     * deadline, so a crashed errand can only ever cost its own timeout.
+     */
+    fun holdSessionOpen(ms: Long)
+
+    /**
+     * Feed a result produced outside the session INTO it, phrased for the
+     * model ("[PAGE AGENT] ..."), so the orchestrating voice can relay it
+     * and take the next step. No-op when no session is live.
+     */
+    fun sendSessionNote(text: String)
+
+    /**
      * Hold the microphone privilege without starting a voice session.
      *
      * This app draws itself as a HUD over whatever the wearer is running, so
