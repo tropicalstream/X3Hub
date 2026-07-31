@@ -638,6 +638,15 @@ class GeminiLiveClient(
                         .put("description", "The page to open: a full https URL or a bare host like 'wikipedia.org'."))
                     .put("query", JSONObject().put("type", "STRING")
                         .put("description", "What to search for, in plain language. Use with 'site' to search that site."))
+                    .put("window", JSONObject().put("type", "STRING")
+                        .put(
+                            "description",
+                            "'new' (default) opens another window. 'current' loads the " +
+                                "page in the window the user is already using — REQUIRED " +
+                                "whenever they say in this window, in the current window, " +
+                                "here, or replace this page. Never open a new window when " +
+                                "the user named the one they want."
+                        ))
                     .put("site", JSONObject().put("type", "STRING")
                         .put(
                             "description",

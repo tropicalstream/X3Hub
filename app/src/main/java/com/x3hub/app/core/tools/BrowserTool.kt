@@ -52,6 +52,26 @@ class BrowserTool(private val context: Context) : AiTapTool {
         // about podcasts instead of that directory's own results.
         val site = arg(args, "site", "on", "where", "engine")
 
+        // "load it IN THIS WINDOW" — navigation, not creation. Board space
+        // is three windows on a 640px eye; a wearer who says "in the
+        // current window" is husbanding it, and opening a fourth surface
+        // they did not ask for spends what they were saving. The native
+        // router loads a URL in-window instantly, and the task listener
+        // already resolves "the current window" the same way every other
+        // this-page caller does.
+        val inCurrent = arg(args, "window", "target", "destination")
+            .lowercase().let { it.contains("current") || it.contains("same") || it.contains("this") }
+        if (inCurrent && url.isNotBlank()) {
+            val resolved = resolveUrl(url) ?: return Result.failure(
+                IllegalArgumentException("Can't load '$url' — give a normal web address.")
+            )
+            return if (AgentTaskBridge.request("go to $resolved")) {
+                Result.success("Loading ${hostLabel(resolved)} in the current window.")
+            } else {
+                Result.success("No window is open yet — opening one instead was needed.")
+            }
+        }
+
         // A site with no search URL is not a web search — it is a page
         // errand on that site. "A station on radio garden" used to become a
         // DuckDuckGo search for the station's name; and when the window was
