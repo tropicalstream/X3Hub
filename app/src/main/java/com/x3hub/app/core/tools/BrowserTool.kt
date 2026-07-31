@@ -2,6 +2,7 @@ package com.x3hub.app.core.tools
 
 import android.content.Context
 import android.net.Uri
+import com.x3hub.app.core.agent.AgentTaskBridge
 import com.x3hub.app.core.agent.PageCommands
 import com.x3hub.app.core.web.LocalPages
 import com.x3hub.app.core.bridge.HudPinStore
@@ -50,6 +51,26 @@ class BrowserTool(private val context: Context) : AiTapTool {
         // so the wearer standing on a podcast directory got a DuckDuckGo page
         // about podcasts instead of that directory's own results.
         val site = arg(args, "site", "on", "where", "engine")
+
+        // A site with no search URL that is ALREADY OPEN as a window is not
+        // a web search — it is a page errand on that window. "A station on
+        // radio garden" used to become a DuckDuckGo search for the station's
+        // name in a NEW window, while the radio.garden window with a working
+        // native tune flow sat right there.
+        if (site.isNotBlank() && query.isNotBlank() &&
+            PageCommands.siteSearchUrl(site, query) == null
+        ) {
+            val stem = site.lowercase().replace(Regex("[^a-z0-9]"), "")
+            val open = browserPins().firstOrNull {
+                stem.isNotEmpty() &&
+                    it.payload.lowercase().replace(Regex("[^a-z0-9]"), "").contains(stem)
+            }
+            if (open != null && AgentTaskBridge.request("play $query", windowHint = stem)) {
+                return Result.success(
+                    "Asking the ${open.label} page to play $query. The result will follow."
+                )
+            }
+        }
 
         val target: String = when {
             site.isNotBlank() && query.isNotBlank() ->

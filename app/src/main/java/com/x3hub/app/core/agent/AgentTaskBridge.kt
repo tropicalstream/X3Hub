@@ -15,17 +15,22 @@ package com.x3hub.app.core.agent
  */
 object AgentTaskBridge {
 
-    @Volatile private var listener: ((String) -> Unit)? = null
+    @Volatile private var listener: ((String, String?) -> Unit)? = null
 
     /** Installed by the activity in onCreate; cleared in onDestroy. */
-    fun setListener(l: ((String) -> Unit)?) {
+    fun setListener(l: ((String, String?) -> Unit)?) {
         listener = l
     }
 
-    /** True when a listener was there to take it. */
-    fun request(task: String): Boolean {
+    /**
+     * True when a listener was there to take it. [windowHint] names which
+     * window the task is about — matched loosely against window URLs —
+     * because the caller sometimes knows ("a station on radio garden")
+     * while the resolver's active/latest heuristics can only guess.
+     */
+    fun request(task: String, windowHint: String? = null): Boolean {
         val l = listener ?: return false
-        l(task)
+        l(task, windowHint)
         return true
     }
 }

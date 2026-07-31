@@ -428,8 +428,41 @@ object PageCommands {
         RegexOption.IGNORE_CASE
     )
 
+    /**
+     * "play <someone> from my purchases" — a NAMED thing from the
+     * collection, which the shuffle must not swallow. The broadened
+     * component match did exactly that: "play 8 bit weapon from my
+     * purchases" contains an own-things noun and a sound verb, so it
+     * shuffled the whole library and played a stranger to the request.
+     * The name is extracted first; generic fillers still mean shuffle.
+     */
+    private val BC_FROM_MINE = Regex(
+        "\\b(?:play|put on|start|listen to)\\s+(.+?)\\s+(?:from|in|out of)\\s+" +
+            "(?:my\\s+)?(?:bandcamp\\s+)?(?:purchases|collection|library)\\b",
+        RegexOption.IGNORE_CASE
+    )
+    private val BC_GENERIC_THING = Regex(
+        "^(?:something|anything|music|stuff|an?\\s+(?:album|song|track|record)|" +
+            "some\\s+(?:music|songs?|tracks?))$",
+        RegexOption.IGNORE_CASE
+    )
+
     /** Bandcamp-only intents, or null to fall through to normal routing. */
-    private fun bandcampIntent(text: String): Outcome? = when {
+    private fun bandcampIntent(text: String): Outcome? {
+        BC_FROM_MINE.find(text)?.groupValues?.get(1)?.trim()?.let { q ->
+            if (q.length >= 2 && !BC_GENERIC_THING.matches(q)) {
+                return Outcome.NavigateThenScript(
+                    url = BC_HOME,
+                    notice = "Looking for $q in your collection",
+                    js = bcPlayFromCollectionJs(q),
+                    thenJs = BC_PRESS_PLAY_JS
+                )
+            }
+        }
+        return bandcampIntentGeneral(text)
+    }
+
+    private fun bandcampIntentGeneral(text: String): Outcome? = when {
         // The exact shapes the double-tap voice path has always used keep
         // first claim, so nothing a wearer says by habit changes meaning.
         BC_PURCHASES.matches(text) -> Outcome.NavigateThenScript(
@@ -539,6 +572,64 @@ object PageCommands {
           }).catch(function(e){ console.log('X3BC ' + e); });
         })();
     """
+
+    /**
+     * Play a NAMED thing from the collection: same fetch as the shuffle,
+     * but items are matched against the request (artist or title, both
+     * lowercased) and a random pick is made among the MATCHES — an artist
+     * with several albums gets variety, a single match plays itself. No
+     * match lands on the collection page so the wearer sees what is there
+     * instead of hearing a stranger.
+     *
+     * The query arrives lowercased with quotes and backslashes stripped, so
+     * embedding it in the script cannot break out of the string literal.
+     */
+    private fun bcPlayFromCollectionJs(rawQuery: String): String {
+        val q = rawQuery.lowercase()
+            .replace("\\", "")
+            .replace("'", "")
+            .replace("\"", "")
+            .trim()
+        return """
+        (function(){
+          $BC_FAN_JS
+          var q = '$q';
+          x3fan().then(function(s){
+            return fetch('https://bandcamp.com/api/fancollection/1/collection_items', {
+              method: 'POST', credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                fan_id: s.fan_id, older_than_token: '9999999999::a::', count: 200
+              })
+            }).then(function(r){ return r.json(); }).then(function(j){
+              var items = (j && j.items) || [];
+              var playable = items.filter(function(it){
+                var h = it && it.url_hints;
+                return h && h.slug && (h.subdomain || h.custom_domain);
+              });
+              var matches = playable.filter(function(it){
+                var hay = ((it.band_name || '') + ' ' + (it.item_title || ''))
+                  .toLowerCase();
+                return hay.indexOf(q) !== -1;
+              });
+              if (!matches.length) {
+                console.log('X3BC no match for ' + q + ' — showing collection');
+                location.href = s.url;
+                return;
+              }
+              var it = matches[Math.floor(Math.random() * matches.length)];
+              var h = it.url_hints;
+              var base = h.subdomain
+                ? ('https://' + h.subdomain + '.bandcamp.com')
+                : ('https://' + h.custom_domain);
+              var kind = (h.item_type === 't') ? 'track' : 'album';
+              console.log('X3BC playing ' + (it.band_name || '') + ' — ' + (it.item_title || ''));
+              location.href = base + '/' + kind + '/' + h.slug;
+            });
+          }).catch(function(e){ console.log('X3BC ' + e); });
+        })();
+        """
+    }
 
     /**
      * Press play once the album page arrives.

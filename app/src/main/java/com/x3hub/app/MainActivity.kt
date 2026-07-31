@@ -1758,7 +1758,7 @@ class MainActivity : AppCompatActivity() {
             uiHandler.post { bookmarkVisiblePage(reply) }
         }
 
-        AgentTaskBridge.setListener { task ->
+        AgentTaskBridge.setListener { task, windowHint ->
             uiHandler.post {
                 // The SAME resolution every other "this page" caller uses.
                 // This listener kept a private older copy of the rule
@@ -1770,7 +1770,19 @@ class MainActivity : AppCompatActivity() {
                 // the one an orchestrated task that arrives 300ms after
                 // open_browser is about.
                 val c = hudPinBoardController
-                val target = pickedWindow()
+                // A caller that NAMED the window wins over every heuristic:
+                // "a station on radio garden" is about the radio.garden
+                // window however inert it is and whatever was opened since.
+                // Matched with non-alphanumerics stripped, because speech
+                // says "radio garden" and the URL spells "radio.garden".
+                fun squash(s: String?) = (s ?: "").lowercase().replace(Regex("[^a-z0-9]"), "")
+                val hinted = windowHint?.takeIf { it.isNotBlank() }?.let { h ->
+                    val hs = squash(h)
+                    c?.browserWindows()?.firstOrNull {
+                        hs.isNotEmpty() && squash(it.currentUrl).contains(hs)
+                    }
+                }
+                val target = hinted ?: pickedWindow()
                 if (target == null) {
                     showNotice("Open a page first, then give the agent a task.")
                 } else {
