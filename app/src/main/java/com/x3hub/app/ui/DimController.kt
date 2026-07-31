@@ -65,6 +65,23 @@ class DimController(
     private var dimmed = false
     private var blackout: BlackoutView? = null
 
+    /**
+     * Readout brightness, 0..1 of full white. The wearer sets it from the
+     * settings slider: 20% suits a dark room, daylight can want most of the
+     * range. Applied to the time/battery text directly; the activity glyphs
+     * keep their fixed ratio ABOVE it (they are the readout's only signal
+     * of something happening, so they must never fall below the text).
+     */
+    private var readoutBrightness = 0.20f
+
+    fun setReadoutBrightness(fraction: Float) {
+        val clamped = fraction.coerceIn(0.05f, 1f)
+        if (clamped == readoutBrightness) return
+        readoutBrightness = clamped
+        blackout?.applyBrightness()
+        if (dimmed) blackout?.invalidate()
+    }
+
     val isDimmed: Boolean get() = dimmed
 
     /** Black out both eyes. Everything keeps running behind it. */
@@ -155,20 +172,31 @@ class DimController(
     private inner class BlackoutView : View(host.context) {
 
         private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = MARK_COLOR
             textSize = READOUT_TEXT_DP * density
             textAlign = Paint.Align.CENTER
         }
 
         /**
          * Activity glyphs get their own paint: the same steel cyan the HUD
-         * strip uses for them, held to low alpha so it reads as a state
-         * light, not a light source.
+         * strip uses for them, held brighter than the text by a fixed ratio
+         * so the state light stays the readout's loudest element at every
+         * brightness the slider can choose.
          */
         private val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = GLYPH_COLOR
             textSize = READOUT_TEXT_DP * density
             textAlign = Paint.Align.LEFT
+        }
+
+        init {
+            applyBrightness()
+        }
+
+        /** Re-derive both alphas from [readoutBrightness]. */
+        fun applyBrightness() {
+            val textAlpha = (readoutBrightness * 255f).toInt().coerceIn(13, 255)
+            val glyphAlpha = (textAlpha * GLYPH_OVER_TEXT).toInt().coerceIn(textAlpha, 255)
+            textPaint.color = (textAlpha shl 24) or 0x00FFFFFF
+            glyphPaint.color = (glyphAlpha shl 24) or (GLYPH_RGB and 0x00FFFFFF)
         }
 
         init {
@@ -232,10 +260,10 @@ class DimController(
         /** dp; cursorView is 1000dp and this must outrank it. */
         const val DIM_ELEVATION_DP = 4000f
 
-        /** 20% white: readable as "alive", too dim to be a light source. */
-        const val MARK_COLOR = 0x33FFFFFF
-        /** The HUD strip's activity cyan, held to ~35% alpha for dim. */
-        const val GLYPH_COLOR = 0x5A7FD9FF
+        /** The HUD strip's activity cyan; alpha comes from the slider. */
+        const val GLYPH_RGB = 0x007FD9FF
+        /** Glyphs draw at 1.75× the text's alpha — the original 35%:20%. */
+        const val GLYPH_OVER_TEXT = 1.75f
         const val GLYPH_GAP_DP = 8f
         const val READOUT_TEXT_DP = 12f
         /**

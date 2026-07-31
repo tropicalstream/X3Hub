@@ -60,6 +60,7 @@ import com.x3hub.app.core.agent.AgentTaskBridge
 import com.x3hub.app.core.agent.AgentVoice
 import com.x3hub.app.core.bridge.AgentActivityBridge
 import com.x3hub.app.core.bridge.DimBridge
+import com.x3hub.app.core.config.HubPrefs
 import com.x3hub.app.core.web.AdBlock
 import com.x3hub.app.core.web.LocalPages
 import com.x3hub.app.core.web.WebDestination
@@ -2161,6 +2162,10 @@ class MainActivity : AppCompatActivity() {
                 setCursorVisible(true)
             }
         }
+        // The wearer's saved brightness, applied before the first dim — a
+        // slider that only took effect after the next visit to settings
+        // would read as broken.
+        dimController?.setReadoutBrightness(HubPrefs.dimHudBrightness(this))
         // The agent's busy flag repaints both activity surfaces the moment
         // it flips — the HUD strip's glyph, and the dim readout, where it is
         // the only sign of life the wearer gets.
@@ -2217,6 +2222,9 @@ class MainActivity : AppCompatActivity() {
                 // the wearer has no other way to tell whether it took.
                 Log.i(TAG, "settings: key '$slotId' changed")
                 showNotice("Saved. Restart the session to use the new key.")
+            },
+            onDimBrightnessChanged = { fraction ->
+                dimController?.setReadoutBrightness(fraction)
             }
         )
     }

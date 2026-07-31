@@ -98,6 +98,32 @@ object HubPrefs {
         prefs(context).edit().putBoolean(PREF_LINK_RESEARCH, enabled).apply()
     }
 
+    /**
+     * How bright the dim-mode readout draws, 0..1 of full white.
+     *
+     * Default matches the original hand-tuned 20%: readable as "alive",
+     * too dim to be a light source in a dark room. The floor is 5%, not
+     * zero — a readout dimmed to nothing makes "dimmed" and "crashed"
+     * identical again, which is the exact confusion the readout exists to
+     * prevent. The ceiling is full brightness, for daylight.
+     */
+    fun dimHudBrightness(context: Context): Float =
+        prefs(context).getFloat(PREF_DIM_HUD_BRIGHTNESS, DIM_HUD_BRIGHTNESS_DEFAULT)
+            .coerceIn(DIM_HUD_BRIGHTNESS_MIN, 1f)
+
+    fun setDimHudBrightness(context: Context, fraction: Float) {
+        prefs(context).edit()
+            .putFloat(
+                PREF_DIM_HUD_BRIGHTNESS,
+                fraction.coerceIn(DIM_HUD_BRIGHTNESS_MIN, 1f)
+            )
+            .apply()
+    }
+
+    const val DIM_HUD_BRIGHTNESS_DEFAULT = 0.20f
+    const val DIM_HUD_BRIGHTNESS_MIN = 0.05f
+    private const val PREF_DIM_HUD_BRIGHTNESS = "dim_hud_brightness"
+
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
 }

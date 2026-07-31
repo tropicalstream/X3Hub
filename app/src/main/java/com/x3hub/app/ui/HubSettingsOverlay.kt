@@ -13,6 +13,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.core.bridge.HudPinStore
@@ -61,6 +62,8 @@ class HubSettingsOverlay(
     private val forceCursorVisible: () -> Unit,
     private val showToast: (String) -> Unit,
     private val onKeyChanged: (slotId: String, newValue: String?) -> Unit,
+    /** Applies a new dim-readout brightness to the live controller. */
+    private val onDimBrightnessChanged: (Float) -> Unit = {},
     private val slots: List<KeySlot> = defaultSlots(activity)
 ) {
 
@@ -270,6 +273,7 @@ class HubSettingsOverlay(
         col.addView(buildBargeInRow())
         col.addView(buildGroundingRow())
         col.addView(buildAgentSttRow())
+        col.addView(buildDimBrightnessRow())
         col.addView(bookmarksBox())
 
         // The panel is taller than the 480px display once there are a few
@@ -415,6 +419,67 @@ class HubSettingsOverlay(
         }
         render()
         row.addView(toggle)
+        return row
+    }
+
+    /**
+     * Brightness of the dim-mode readout (the time/battery line), as a bar
+     * the wearer taps along — the overlay's input is synthetic single taps
+     * at a point, which a SeekBar answers by jumping its thumb there, so
+     * "tap where you want it" IS this panel's slide. The percentage label
+     * doubles as live feedback, and the change applies to the controller
+     * immediately so the next dim shows exactly what was chosen.
+     *
+     * The range starts at the floor, not zero: a readout dimmed to nothing
+     * makes "dimmed" and "crashed" identical again, which is the confusion
+     * the readout exists to prevent.
+     */
+    private fun buildDimBrightnessRow(): View {
+        val row = LinearLayout(activity)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.background = boxBg(fill = 0x14FFFFFF, stroke = 0x40FFFFFF, strokeW = 1)
+        row.setPadding(10, 2, 10, 2)
+        row.layoutParams = LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = 6 }
+
+        row.addView(
+            label("Dim display brightness", 15f, ACCENT, bold = true).apply {
+                layoutParams = LinearLayout.LayoutParams(WRAP, WRAP)
+                maxLines = 1
+            }
+        )
+
+        val pct = label("", 13f, Color.WHITE).apply {
+            layoutParams = LinearLayout.LayoutParams(56, WRAP).apply { leftMargin = 8 }
+            gravity = Gravity.END
+        }
+
+        val floorPercent = (HubPrefs.DIM_HUD_BRIGHTNESS_MIN * 100).toInt()
+        val bar = SeekBar(activity)
+        bar.max = 100 - floorPercent
+        bar.progress =
+            (HubPrefs.dimHudBrightness(activity) * 100).toInt() - floorPercent
+        // The overlay hit-test treats clickable as interactive; a SeekBar
+        // is focusable but NOT clickable by default, so without this the
+        // synthetic tap would fall through the bar as inert surface.
+        bar.isClickable = true
+        bar.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f).apply { leftMargin = 10 }
+        bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                val fraction = (value + floorPercent) / 100f
+                pct.text = "${value + floorPercent}%"
+                if (fromUser) {
+                    HubPrefs.setDimHudBrightness(activity, fraction)
+                    onDimBrightnessChanged(fraction)
+                }
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+        pct.text = "${bar.progress + floorPercent}%"
+
+        row.addView(bar)
+        row.addView(pct)
         return row
     }
 
