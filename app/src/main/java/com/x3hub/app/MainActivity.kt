@@ -283,7 +283,12 @@ class MainActivity : AppCompatActivity() {
                     // consumed the plain arming and the follow-up ran on the
                     // wrong document.
                     outcome.thenJs?.let { after ->
-                        window.runAfterPageChangeFrom(outcome.url) {
+                        // Re-injected on every subsequent finish for a
+                        // bounded window, because the destination can reload
+                        // ITSELF (bandcamp's bot challenge does) and a
+                        // one-shot follow-up dies with the first document.
+                        // thenJs scripts are idempotent by contract.
+                        window.runOnPageFinishesUntil(outcome.url) {
                             window.evaluateJavascript(after)
                         }
                     }

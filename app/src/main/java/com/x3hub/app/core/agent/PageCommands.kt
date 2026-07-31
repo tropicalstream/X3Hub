@@ -525,9 +525,15 @@ object PageCommands {
             if (!playable.length) { console.log('X3BC nothing owned'); return; }
             var it = playable[Math.floor(Math.random() * playable.length)];
             var h = it.url_hints;
-            var base = h.custom_domain
-              ? ('https://' + h.custom_domain)
-              : ('https://' + h.subdomain + '.bandcamp.com');
+            /* The SUBDOMAIN, preferred over custom_domain, because custom
+               domains rot while bandcamp keeps serving the subdomain
+               forever: the API still hinted an artist's long-abandoned
+               domain and the shuffle landed on that site's 404 page — a
+               shuffled album with no player, no audio, and nothing for the
+               press-play chaser to press. */
+            var base = h.subdomain
+              ? ('https://' + h.subdomain + '.bandcamp.com')
+              : ('https://' + h.custom_domain);
             var kind = (h.item_type === 't') ? 'track' : 'album';
             location.href = base + '/' + kind + '/' + h.slug;
           }).catch(function(e){ console.log('X3BC ' + e); });

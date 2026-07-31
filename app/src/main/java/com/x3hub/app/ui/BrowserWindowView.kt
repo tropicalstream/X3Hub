@@ -1002,6 +1002,40 @@ class BrowserWindowView @JvmOverloads constructor(
     }
 
     /**
+     * Run [block] on EVERY page finish that is not [notUrl], until
+     * [windowMs] runs out — for follow-ups that must survive a page
+     * replacing itself.
+     *
+     * One-shot arming dies with its document, and documents die more than
+     * once per navigation now: bandcamp's bot-challenge script reloads the
+     * album page after it lands (script.js?reload=true), so the press-play
+     * chaser started on the album, was killed by the challenge reload
+     * mid-retry, and the reloaded page arrived with nothing armed — a
+     * shuffled album sitting silent, twice, with two different arming
+     * schemes. The block must be IDEMPOTENT (press-play checks playing()
+     * before touching anything); the deadline bounds the repetition so it
+     * cannot outlive its errand.
+     */
+    fun runOnPageFinishesUntil(
+        notUrl: String,
+        windowMs: Long = 45_000L,
+        block: (String?) -> Unit
+    ) {
+        fun norm(u: String?) = (u ?: "").substringBefore('#').trimEnd('/')
+        val skip = norm(notUrl)
+        val deadline = SystemClock.uptimeMillis() + windowMs
+        fun arm() {
+            pageFinishedOnce.add { url ->
+                if (SystemClock.uptimeMillis() < deadline) {
+                    if (norm(url) != skip) block(url)
+                    arm()
+                }
+            }
+        }
+        arm()
+    }
+
+    /**
      * The page's readable text, for the page agent. innerText rather than
      * textContent on purpose: it respects display:none and collapses the
      * whitespace, so navigation furniture and hidden menus do not drown the
