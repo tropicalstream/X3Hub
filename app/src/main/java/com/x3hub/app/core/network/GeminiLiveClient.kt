@@ -93,6 +93,12 @@ class GeminiLiveClient(
                 "StarTalk Radio, the one by Neil deGrasse Tyson' finds the right show " +
                 "among several with near-identical names; 'play the newest star talk' " +
                 "once played a sound-alike that had been dead for years. " +
+                "THE USER'S OWN THINGS ON A SITE — purchases, collection, library, " +
+                "wishlist, playlists, subscriptions, history — are NEVER search queries: " +
+                "'play my purchases on bandcamp' means open_browser(url bandcamp.com) then " +
+                "page_agent('open my purchases and play them'), because searching a store " +
+                "for the word purchases returns strangers' albums that happen to carry " +
+                "that name. Personal-library errands go to page_agent, always. " +
                 "After dispatching page_agent say only that " +
                 "the agent is on it — the agent works for up to a minute, so WAIT; never " +
                 "invent its outcome. Its result then arrives as a message starting " +

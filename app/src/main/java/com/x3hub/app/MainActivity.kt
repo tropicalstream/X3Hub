@@ -245,8 +245,9 @@ class MainActivity : AppCompatActivity() {
      * prompt tells it to stay on the page, so a browsing instruction sent to
      * it costs a slow model round trip and then fails.
      */
-    private fun dispatchPageCommand(text: String, window: BrowserWindowView) {
-        when (val outcome = PageCommands.route(text, window)) {
+    private fun dispatchPageCommand(text: String, window: BrowserWindowView): PageCommands.Outcome {
+        val outcome = PageCommands.route(text, window)
+        when (outcome) {
             is PageCommands.Outcome.Handled -> {
                 showNotice(outcome.notice)
                 releasePageCommandToCursor(window)
@@ -295,6 +296,7 @@ class MainActivity : AppCompatActivity() {
                 window.loadUrl(outcome.url)
             }
         }
+        return outcome
     }
 
     /**
@@ -1759,9 +1761,42 @@ class MainActivity : AppCompatActivity() {
                     if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) {
                         runCatching { voiceServiceApi?.holdSessionOpen(90_000L) }
                     }
-                    // activate() already wakes a still, but the agent needs
-                    // the DOM in place before it plans against it.
-                    target.ensureLoaded { agentFor(target).run(task) }
+                    // THE SAME ROUTER THE SPOKEN PATH USES, not a straight
+                    // line to the LLM agent. The native layer owns whole
+                    // flows the agent cannot do — opening a music library,
+                    // tuning a station, in-page search — and skipping it left
+                    // the orchestrated path dumber than the double-tap it
+                    // replaced: "play my purchases" became a search for the
+                    // word purchases while the machinery for it sat unused.
+                    target.ensureLoaded {
+                        val outcome = dispatchPageCommand(task, target)
+                        val agentWillReport =
+                            outcome is PageCommands.Outcome.ForAgent ||
+                                outcome is PageCommands.Outcome.SearchThenAgent
+                        if (!agentWillReport &&
+                            HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE
+                        ) {
+                            // A native flow completes without the agent's
+                            // done-callback, so close the orchestrator's loop
+                            // here — otherwise the session holds 90s for a
+                            // report that is never coming.
+                            runCatching { voiceServiceApi?.holdSessionOpen(0L) }
+                            val what = when (outcome) {
+                                is PageCommands.Outcome.Handled -> outcome.notice
+                                is PageCommands.Outcome.RunScript -> outcome.notice
+                                is PageCommands.Outcome.NavigateThenScript -> outcome.notice
+                                is PageCommands.Outcome.SearchInPage -> "Searching the page."
+                                is PageCommands.Outcome.StopAgent -> "Stopped."
+                                else -> "Done."
+                            }
+                            runCatching {
+                                voiceServiceApi?.sendSessionNote(
+                                    "[PAGE AGENT FINISHED] $what — relay this to " +
+                                        "the user in one short sentence."
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
