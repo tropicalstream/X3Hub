@@ -55,6 +55,7 @@ import com.x3hub.app.BuildConfig
 import com.x3hub.app.core.agent.AgentSpeech
 import com.x3hub.app.core.agent.AgentTaskBridge
 import com.x3hub.app.core.agent.AgentVoice
+import com.x3hub.app.core.bridge.AgentActivityBridge
 import com.x3hub.app.core.bridge.DimBridge
 import com.x3hub.app.core.web.AdBlock
 import com.x3hub.app.core.web.LocalPages
@@ -1548,6 +1549,7 @@ class MainActivity : AppCompatActivity() {
         // no-window notice, and the singleton pins this instance in
         // memory until the next activity replaces the listener.
         AgentTaskBridge.setListener(null)
+        AgentActivityBridge.setListener(null)
         // A dim state must not outlive the surface that was dimmed — the
         // next activity starts lit, and the tool layer must agree.
         DimBridge.dimmed = false
@@ -1728,9 +1730,49 @@ class MainActivity : AppCompatActivity() {
                 renderAiBadge(state)
                 renderVoiceOrb(state)
                 renderNotice(state)
+                renderActivityGlyphs()
+                dimController?.refreshReadout()
                 handleVoicePhaseChange(state.phase)
             }
         }
+    }
+
+    /**
+     * "Is anything happening?" as one or two characters beside the battery:
+     * ✦ while a Gemini session is live, ⚙ while the page agent works. Both
+     * can be true at once — an orchestrated errand is exactly that.
+     */
+    private fun activityGlyphs(): String = buildString {
+        if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) append('✦')
+        if (AgentActivityBridge.busy) append('⚙')
+    }
+
+    private fun renderActivityGlyphs() {
+        val tv = findViewById<TextView?>(R.id.unipanelHudActivity) ?: return
+        val glyphs = activityGlyphs()
+        if (glyphs.isEmpty()) {
+            tv.visibility = View.GONE
+            return
+        }
+        // Two states, two colours, one view: session cyan, agent a warm
+        // white — distinguishable at a glance without reading anything.
+        val styled = android.text.SpannableString(glyphs)
+        var i = 0
+        if (glyphs.startsWith("✦")) {
+            styled.setSpan(
+                android.text.style.ForegroundColorSpan(0xFF7FD9FF.toInt()),
+                0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            i = 1
+        }
+        if (i < glyphs.length) {
+            styled.setSpan(
+                android.text.style.ForegroundColorSpan(0xFFE8E0C8.toInt()),
+                i, glyphs.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        tv.text = styled
+        tv.visibility = View.VISIBLE
     }
 
     /**
@@ -2039,7 +2081,10 @@ class MainActivity : AppCompatActivity() {
         // Gemini session, its audio and every browser page keep running, so
         // coming back is a repaint rather than a reload. While dimmed the
         // cursor is pointless, so it is parked.
-        dimController = DimController(root) { dimmed ->
+        dimController = DimController(
+            root,
+            statusGlyphs = { activityGlyphs() }
+        ) { dimmed ->
             // The tool layer reads this: while dimmed, every open_browser
             // drives the one invisible window instead of minting siblings
             // the wearer cannot see.
@@ -2052,6 +2097,15 @@ class MainActivity : AppCompatActivity() {
                 hideOnScreenKeyboard()
             } else {
                 setCursorVisible(true)
+            }
+        }
+        // The agent's busy flag repaints both activity surfaces the moment
+        // it flips — the HUD strip's glyph, and the dim readout, where it is
+        // the only sign of life the wearer gets.
+        AgentActivityBridge.setListener {
+            uiHandler.post {
+                renderActivityGlyphs()
+                dimController?.refreshReadout()
             }
         }
 
@@ -3257,17 +3311,25 @@ class MainActivity : AppCompatActivity() {
 
         /**
          * Cursor-px of CONTINUED downward pull, measured only while the
-         * cursor is pinned at the bottom edge, that enters dim. More than
-         * half a screen-height of overscroll: far past anything an aiming
-         * gesture produces, small enough to cross in one unhurried drag.
+         * cursor is pinned at the bottom edge, that enters dim.
+         *
+         * Sized against the PAD, not the screen: at 0.45 cursor gain a full
+         * finger stroke down the temple pad yields roughly 200 cursor px,
+         * and part of every stroke is spent reaching the edge in the first
+         * place. The first cut asked for 260 — more overscroll than one
+         * stroke can physically contain, so the gesture was unenterable and
+         * measured exactly so on the glasses. 140 is far past aiming noise
+         * and comfortably inside one deliberate stroke.
          */
-        private const val DIM_PULL_THROUGH_PX = 260f
+        private const val DIM_PULL_THROUGH_PX = 140f
 
         /**
-         * A pause longer than this resets the pull — continuity is the
-         * signature of intent; a finger resting at the edge is not one.
+         * A pause longer than this resets the pull. Long enough to survive
+         * the finger LIFTING AND RE-PLANTING mid-pull — on a pad this small
+         * a long pull is often two strokes — while a wearer who stops to
+         * think still starts over: continuity is the signature of intent.
          */
-        private const val DIM_PULL_GAP_MS = 400L
+        private const val DIM_PULL_GAP_MS = 900L
 
         /** y where under-HUD content starts (2 + 36px strip + gap). */
         private const val HUD_CONTENT_TOP = 46

@@ -49,6 +49,14 @@ import java.util.Calendar
  */
 class DimController(
     private val host: FrameLayout,
+    /**
+     * Activity glyphs to show beside the battery — "✦" while a Gemini
+     * session is live, "⚙" while the page agent works. Sampled at draw
+     * time; the activity calls [refreshReadout] when either changes,
+     * because in dim this readout is the ONLY surface there is, and
+     * "still working" and "silently died" must not look identical.
+     */
+    private val statusGlyphs: () -> String = { "" },
     private val onDimChanged: (Boolean) -> Unit = {}
 ) {
 
@@ -111,6 +119,11 @@ class DimController(
         v.postDelayed(minuteTick, 60_000L - msIntoMinute + 250L)
     }
 
+    /** Repaint the readout now — a state glyph changed. No-op unless dimmed. */
+    fun refreshReadout() {
+        if (dimmed) blackout?.invalidate()
+    }
+
     /**
      * A child's visibility change already invalidates up the tree, and
      * BinocularSbsLayout.onDescendantInvalidated redraws both eyes. This is the
@@ -147,6 +160,17 @@ class DimController(
             textAlign = Paint.Align.CENTER
         }
 
+        /**
+         * Activity glyphs get their own paint: the same steel cyan the HUD
+         * strip uses for them, held to low alpha so it reads as a state
+         * light, not a light source.
+         */
+        private val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = GLYPH_COLOR
+            textSize = READOUT_TEXT_DP * density
+            textAlign = Paint.Align.LEFT
+        }
+
         init {
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -179,12 +203,15 @@ class DimController(
                 .format(java.util.Date())
             val battery = batteryPercent()?.let { "$it%" } ?: ""
             val line = if (battery.isEmpty()) time else "$time   $battery"
-            canvas.drawText(
-                line,
-                width * 0.5f,
-                height - READOUT_BOTTOM_INSET_DP * density,
-                textPaint
-            )
+            val baseline = height - READOUT_BOTTOM_INSET_DP * density
+            canvas.drawText(line, width * 0.5f, baseline, textPaint)
+            val glyphs = statusGlyphs()
+            if (glyphs.isNotEmpty()) {
+                // To the RIGHT of the centred line rather than inside it, so
+                // the time does not shift sideways when a session starts.
+                val lineEnd = width * 0.5f + textPaint.measureText(line) * 0.5f
+                canvas.drawText(glyphs, lineEnd + GLYPH_GAP_DP * density, baseline, glyphPaint)
+            }
         }
 
         private fun batteryPercent(): Int? {
@@ -207,6 +234,9 @@ class DimController(
 
         /** 20% white: readable as "alive", too dim to be a light source. */
         const val MARK_COLOR = 0x33FFFFFF
+        /** The HUD strip's activity cyan, held to ~35% alpha for dim. */
+        const val GLYPH_COLOR = 0x5A7FD9FF
+        const val GLYPH_GAP_DP = 8f
         const val READOUT_TEXT_DP = 12f
         /**
          * Clear of the very last rows: the waveguide's edge rows are the

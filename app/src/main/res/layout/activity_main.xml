@@ -90,6 +90,22 @@
                     android:letterSpacing="0.04"
                     tools:ignore="UnusedAttribute" />
 
+                <!-- Activity: ✦ while a Gemini session is live, ⚙ while the
+                     page agent works. Sits beside the battery so a glance
+                     answers "is anything happening" — the agent can run a
+                     minute with nothing else on screen to show for it. -->
+                <TextView
+                    android:id="@+id/unipanelHudActivity"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text=""
+                    android:textColor="#FF7FD9FF"
+                    android:textSize="11sp"
+                    android:visibility="gone"
+                    tools:ignore="UnusedAttribute" />
+
                 <!-- Network status: Wi-Fi / cellular / offline, driven by a
                      default-network ConnectivityManager callback. -->
                 <TextView

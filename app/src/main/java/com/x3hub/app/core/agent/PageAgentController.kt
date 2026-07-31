@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
+import com.x3hub.app.core.bridge.AgentActivityBridge
 import com.x3hub.app.ui.BrowserWindowView
 import org.json.JSONObject
 
@@ -55,7 +56,20 @@ class PageAgentController(
     private val main = Handler(Looper.getMainLooper())
 
     private var running = false
+
+    /**
+     * The task being worked on — non-null from dispatch to terminal, and
+     * the ONE truthful "is the agent busy" signal: `running` flickers false
+     * across every navigation hop while the errand is very much alive.
+     * The setter mirrors it to [AgentActivityBridge], so the HUD's activity
+     * glyph follows every terminal — done, error, stop, watchdog, hop
+     * budget — without each of them having to remember a second flag.
+     */
     private var taskText: String? = null
+        set(value) {
+            field = value
+            AgentActivityBridge.set(value != null)
+        }
     private var hops = 0
     private var resumePending = false
     private var injected = false
@@ -67,6 +81,10 @@ class PageAgentController(
         taskText = null
         hops = 0
         showNotice("The agent stopped responding.")
+        // A wedge is a terminal like any other: without this the
+        // orchestrator held the session open for a report that was never
+        // coming, and the wearer heard nothing at all.
+        onResult?.invoke("The agent stopped responding.", false)
     }
 
     init {
@@ -115,6 +133,9 @@ class PageAgentController(
     }
 
     fun destroy() {
+        // The window is going away and the agent with it — a busy glyph
+        // must not outlive the worker it describes.
+        taskText = null
         clearWatchdog()
         window.onPageStartedListener = null
         window.onPageFinishedListener = null
