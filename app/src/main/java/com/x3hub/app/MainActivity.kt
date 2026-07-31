@@ -964,11 +964,20 @@ class MainActivity : AppCompatActivity() {
                 intent?.getStringExtra("task")?.let { t ->
                     // Exercises the dispatch half without a microphone: the
                     // capture half needs real speech in the room, which a
-                    // scripted run cannot produce.
-                    val w = hudPinBoardController?.browserWindows()
-                        ?.firstOrNull { it.isActive }
-                        ?: hudPinBoardController?.browserWindows()?.firstOrNull()
-                    Log.i(TAG, "DEBUG task window=${w != null}: $t")
+                    // scripted run cannot produce. `-e on <host>` targets a
+                    // window by URL substring, because active-or-first made
+                    // scripted runs depend on whatever the wearer happened
+                    // to leave on the board — a test suite dispatched "go to
+                    // my purchases" at a leftover search window and scored
+                    // its own miss as the app's.
+                    val on = intent.getStringExtra("on")?.lowercase()
+                    val windows = hudPinBoardController?.browserWindows().orEmpty()
+                    val w = on?.let { h ->
+                        windows.firstOrNull { it.currentUrl.orEmpty().contains(h, true) }
+                    }
+                        ?: windows.firstOrNull { it.isActive }
+                        ?: windows.firstOrNull()
+                    Log.i(TAG, "DEBUG task window=${w?.currentUrl?.take(40)}: $t")
                     if (w == null) showNotice("No window open.") else dispatchPageCommand(t, w)
                     return
                 }

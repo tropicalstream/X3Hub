@@ -52,27 +52,38 @@ class BrowserTool(private val context: Context) : AiTapTool {
         // about podcasts instead of that directory's own results.
         val site = arg(args, "site", "on", "where", "engine")
 
-        // A site with no search URL that is ALREADY OPEN as a window is not
-        // a web search — it is a page errand on that window. "A station on
-        // radio garden" used to become a DuckDuckGo search for the station's
-        // name in a NEW window, while the radio.garden window with a working
-        // native tune flow sat right there.
-        if (site.isNotBlank() && query.isNotBlank() &&
+        // A site with no search URL is not a web search — it is a page
+        // errand on that site. "A station on radio garden" used to become a
+        // DuckDuckGo search for the station's name; and when the window was
+        // not open yet, the first fix still fell through to that search,
+        // because it only knew how to use a window that already existed. If
+        // the site is open, the errand goes to its window; if the site is
+        // KNOWN but closed, it is opened and the errand follows it in — the
+        // listener's ensureLoaded holds the task until the page is there.
+        var followUpTask: String? = null
+        var followUpHint: String? = null
+        val siteStem = site.lowercase().replace(Regex("[^a-z0-9]"), "")
+        val siteSearchMiss = site.isNotBlank() && query.isNotBlank() &&
             PageCommands.siteSearchUrl(site, query) == null
-        ) {
-            val stem = site.lowercase().replace(Regex("[^a-z0-9]"), "")
+        if (siteSearchMiss) {
             val open = browserPins().firstOrNull {
-                stem.isNotEmpty() &&
-                    it.payload.lowercase().replace(Regex("[^a-z0-9]"), "").contains(stem)
+                siteStem.isNotEmpty() &&
+                    it.payload.lowercase().replace(Regex("[^a-z0-9]"), "").contains(siteStem)
             }
-            if (open != null && AgentTaskBridge.request("play $query", windowHint = stem)) {
+            if (open != null && AgentTaskBridge.request("play $query", windowHint = siteStem)) {
                 return Result.success(
                     "Asking the ${open.label} page to play $query. The result will follow."
                 )
             }
+            // Site closed but known by name: open it and defer the errand.
+            spokenHost(site)?.let {
+                followUpTask = "play $query"
+                followUpHint = siteStem
+            }
         }
 
         val target: String = when {
+            followUpTask != null -> "https://${spokenHost(site)}"
             site.isNotBlank() && query.isNotBlank() ->
                 PageCommands.siteSearchUrl(site, query)
                     // An unknown site is not a failure: searching the web for
@@ -155,6 +166,17 @@ class BrowserTool(private val context: Context) : AiTapTool {
             return Result.success(
                 "The HUD board is full (${HudPinStore.MAX_PINS} pins), so there's no room " +
                     "for a browser window. Ask the user which pin to remove first."
+            )
+        }
+
+        // The deferred errand rides in AFTER the pin exists, so the task
+        // listener's lastAddedPinId resolution points at this very window
+        // and its ensureLoaded holds the task until the page is ready.
+        followUpTask?.let { t ->
+            AgentTaskBridge.request(t, windowHint = followUpHint)
+            return Result.success(
+                "Opening ${hostLabel(target)} and asking it to play $query. " +
+                    "The result will follow."
             )
         }
 
