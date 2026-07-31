@@ -60,8 +60,14 @@ class BrowserTool(private val context: Context) : AiTapTool {
         // is three windows on a 640px eye; a wearer who says "in the
         // current window" is husbanding it, and opening a fourth surface
         // they did not ask for spends what they were saving.
-        val inCurrent = arg(args, "window", "target", "destination")
-            .lowercase().let { it.contains("current") || it.contains("same") || it.contains("this") }
+        //
+        // Dim forces the same placement without being asked: the display is
+        // black, so the wearer cannot see windows and cannot close them —
+        // every open while dimmed drives the ONE invisible window, and a
+        // board that entered dim with one window leaves dim with one.
+        val inCurrent = com.x3hub.app.core.bridge.DimBridge.dimmed ||
+            arg(args, "window", "target", "destination")
+                .lowercase().let { it.contains("current") || it.contains("same") || it.contains("this") }
 
         // ONE resolver, before any placement decision. Where the page shows
         // up can choose a surface; it can never change where the wearer

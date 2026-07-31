@@ -1,10 +1,14 @@
 package com.x3hub.app.ui
 
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.BatteryManager
 import android.view.View
 import android.widget.FrameLayout
+import java.util.Calendar
 
 /**
  * Dim mode: an opaque black surface draped over the whole logical viewport.
@@ -38,10 +42,10 @@ import android.widget.FrameLayout
  *     a wearer who pulled right by accident had nothing to distinguish "dimmed"
  *     from "crashed" or "glasses off". See [BlackoutView].
  *
- * The activity owns the gestures (pull right → [enter], pull left → [exit]) and
- * owns the rule that neither is reachable while a browser window has focus;
- * [isDimmed] is here so it can also suppress cursor movement, clicks and the
- * tap pipeline while black.
+ * The activity owns the gestures (bottom-edge pull-through → [enter],
+ * triple tap → [exit]) and owns the rule that entry is not reachable while a
+ * browser window has focus; [isDimmed] is here so it can also suppress cursor
+ * movement, clicks and the tap pipeline while black.
  */
 class DimController(
     private val host: FrameLayout,
@@ -66,6 +70,7 @@ class DimController(
             host.addView(it)
         }
         view.visibility = View.VISIBLE
+        scheduleMinuteTick()
         forceBinocularRepaint()
         onDimChanged(true)
     }
@@ -76,9 +81,34 @@ class DimController(
         dimmed = false
         // INVISIBLE and not GONE: GONE would drop the view out of the layout
         // pass and make the next enter() a relayout instead of a redraw.
-        blackout?.visibility = View.INVISIBLE
+        blackout?.let {
+            it.removeCallbacks(minuteTick)
+            it.visibility = View.INVISIBLE
+        }
         forceBinocularRepaint()
         onDimChanged(false)
+    }
+
+    /**
+     * The readout changes once a minute, so it is redrawn once a minute —
+     * scheduled to the top of the NEXT minute rather than every 60s from an
+     * arbitrary phase, so the shown time is never up to a minute stale. This
+     * is the only recurring work dim does, and it stops with [exit]; the
+     * whole point of the mode is a projector with nothing to do.
+     */
+    private val minuteTick = Runnable {
+        if (dimmed) {
+            blackout?.invalidate()
+            scheduleMinuteTick()
+        }
+    }
+
+    private fun scheduleMinuteTick() {
+        val v = blackout ?: return
+        v.removeCallbacks(minuteTick)
+        val now = Calendar.getInstance()
+        val msIntoMinute = now.get(Calendar.SECOND) * 1000L + now.get(Calendar.MILLISECOND)
+        v.postDelayed(minuteTick, 60_000L - msIntoMinute + 250L)
     }
 
     /**
@@ -95,26 +125,26 @@ class DimController(
     }
 
     /**
-     * The blackout itself, plus the one mark that stays visible while dimmed.
+     * The blackout itself, plus the one thing that stays visible while
+     * dimmed: the time and the battery, small, at the bottom of the view.
      *
-     * The mark is a small chevron at the left edge pointing left, because the
-     * way out is a left pull on the temple pad — the affordance and the
-     * instruction are the same shape. It is drawn at 20% white, bright enough
-     * to prove the app is alive and dim enough not to be a light source in a
-     * dark room, and it is deliberately static: anything that pulsed would
-     * invalidate the tree every frame and keep the projector busy for the whole
-     * time the wearer thought the display was off.
+     * That pair is the whole display contract of dim mode — the wearer is
+     * looking at the WORLD, and a glance down answers the only two questions
+     * glasses get asked while worn as glasses. Drawn at 20% white: bright
+     * enough to read against a dark room, too dim to be a light source in
+     * one, and deliberately static between minute ticks — anything that
+     * pulsed would invalidate the tree every frame and keep the projector
+     * busy for the whole time the wearer thought the display was off.
      *
-     * No background drawable is set. Filling in onDraw keeps the outline empty,
-     * so this large elevated view casts no shadow.
+     * No background drawable is set. Filling in onDraw keeps the outline
+     * empty, so this large elevated view casts no shadow.
      */
     private inner class BlackoutView : View(host.context) {
 
-        private val markPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = MARK_COLOR
-            strokeWidth = MARK_STROKE_DP * density
-            strokeCap = Paint.Cap.ROUND
+            textSize = READOUT_TEXT_DP * density
+            textAlign = Paint.Align.CENTER
         }
 
         init {
@@ -138,16 +168,36 @@ class DimController(
 
         override fun onDraw(canvas: Canvas) {
             // Fills the current clip, which dispatchDraw has already narrowed to
-            // the eye being drawn. Allocates nothing: this runs at frame rate
-            // whenever a WebView or the session animates behind the black.
+            // the eye being drawn. Allocates nothing on the black itself; the
+            // readout formats two small strings once per minute tick.
             canvas.drawColor(Color.BLACK)
 
-            val centreY = height * 0.5f
-            val tipX = MARK_INSET_DP * density
-            val tailX = tipX + MARK_LENGTH_DP * density
-            val halfSpan = MARK_HALF_SPAN_DP * density
-            canvas.drawLine(tailX, centreY - halfSpan, tipX, centreY, markPaint)
-            canvas.drawLine(tipX, centreY, tailX, centreY + halfSpan, markPaint)
+            // Sampled at draw time, not cached: the sticky battery intent is
+            // a cheap read, and caching it is how a readout shows 40% for an
+            // hour. Respects the device's 12/24-hour setting.
+            val time = android.text.format.DateFormat.getTimeFormat(context)
+                .format(java.util.Date())
+            val battery = batteryPercent()?.let { "$it%" } ?: ""
+            val line = if (battery.isEmpty()) time else "$time   $battery"
+            canvas.drawText(
+                line,
+                width * 0.5f,
+                height - READOUT_BOTTOM_INSET_DP * density,
+                textPaint
+            )
+        }
+
+        private fun batteryPercent(): Int? {
+            // The sticky broadcast needs no receiver registration and no
+            // lifecycle: null-receiver registerReceiver returns the last
+            // ACTION_BATTERY_CHANGED immediately.
+            val i = runCatching {
+                context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            }.getOrNull() ?: return null
+            val level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            if (level < 0 || scale <= 0) return null
+            return level * 100 / scale
         }
     }
 
@@ -157,9 +207,12 @@ class DimController(
 
         /** 20% white: readable as "alive", too dim to be a light source. */
         const val MARK_COLOR = 0x33FFFFFF
-        const val MARK_STROKE_DP = 1.5f
-        const val MARK_INSET_DP = 10f
-        const val MARK_LENGTH_DP = 7f
-        const val MARK_HALF_SPAN_DP = 6f
+        const val READOUT_TEXT_DP = 12f
+        /**
+         * Clear of the very last rows: the waveguide's edge rows are the
+         * first to distort on this projector, and the readout is the only
+         * thing on screen — nothing competes for the safer band above.
+         */
+        const val READOUT_BOTTOM_INSET_DP = 18f
     }
 }

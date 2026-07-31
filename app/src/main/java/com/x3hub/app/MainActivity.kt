@@ -55,6 +55,7 @@ import com.x3hub.app.BuildConfig
 import com.x3hub.app.core.agent.AgentSpeech
 import com.x3hub.app.core.agent.AgentTaskBridge
 import com.x3hub.app.core.agent.AgentVoice
+import com.x3hub.app.core.bridge.DimBridge
 import com.x3hub.app.core.web.AdBlock
 import com.x3hub.app.core.web.LocalPages
 import com.x3hub.app.core.web.WebDestination
@@ -955,6 +956,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showOnScreenKeyboard(window: BrowserWindowView) {
+        // A page behind the blackout can still focus an input; a keyboard
+        // rising over a display the wearer believes is off would be both
+        // invisible and stealing the taps dim reserves for Gemini and undim.
+        if (dimController?.isDimmed == true) return
         stopEdgeScroll()
         suppressImeFor(1500L)
         keyboardOwner = window
@@ -1400,6 +1405,20 @@ class MainActivity : AppCompatActivity() {
                 // transform, so it also rewrites any CSS a probe injects —
                 // which makes "is dark mode what broke this page" impossible
                 // to answer from JS alone. This is the only way to ask.
+                intent?.getStringExtra("dimmode")?.let { want ->
+                    // Drives the REAL controller, so the bridge flag, the
+                    // cursor, the keyboard and the tap policy all follow —
+                    // a door that only painted black would test none of it.
+                    val dim = dimController
+                    when (want.trim().lowercase()) {
+                        "on", "1", "enter" -> dim?.enter()
+                        "off", "0", "exit" -> {
+                            dim?.exit()
+                        }
+                    }
+                    Log.i(TAG, "DEBUG dimmode -> dimmed=${dim?.isDimmed} bridge=${DimBridge.dimmed}")
+                    return
+                }
                 intent?.getStringExtra("dark")?.let { want ->
                     val on = intent.getStringExtra("on")?.lowercase()
                     val windows = hudPinBoardController?.browserWindows().orEmpty()
@@ -1529,6 +1548,9 @@ class MainActivity : AppCompatActivity() {
         // no-window notice, and the singleton pins this instance in
         // memory until the next activity replaces the listener.
         AgentTaskBridge.setListener(null)
+        // A dim state must not outlive the surface that was dimmed — the
+        // next activity starts lit, and the tool layer must agree.
+        DimBridge.dimmed = false
         // WebViews hold a lot and do not go quietly: destroy them explicitly
         // rather than trusting the activity teardown to collect them.
         hudPinBoardController?.browserWindows()?.forEach { it.destroy() }
@@ -2018,7 +2040,19 @@ class MainActivity : AppCompatActivity() {
         // coming back is a repaint rather than a reload. While dimmed the
         // cursor is pointless, so it is parked.
         dimController = DimController(root) { dimmed ->
-            if (dimmed) setCursorVisible(false)
+            // The tool layer reads this: while dimmed, every open_browser
+            // drives the one invisible window instead of minting siblings
+            // the wearer cannot see.
+            DimBridge.dimmed = dimmed
+            if (dimmed) {
+                setCursorVisible(false)
+                // A page mid-flow may already own an edge scroll; a display
+                // that is off must not keep a page quietly animating.
+                stopEdgeScroll()
+                hideOnScreenKeyboard()
+            } else {
+                setCursorVisible(true)
+            }
         }
 
         hudPinBoardController?.onBrowserWindowCreated = { w ->
@@ -2375,6 +2409,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateEdgeScroll() {
+        // Nothing scrolls while the display is off.
+        if (dimController?.isDimmed == true) { stopEdgeScroll(); return }
         // Settings first: it covers the viewport, so while it is up there is
         // no window underneath for the cursor to be over anyway.
         if (updateSettingsEdgeScroll()) return
@@ -2448,18 +2484,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Pull right to dim, pull left to come back.
+     * The deliberate horizontal swipe: resize, while a window is modifying.
      *
-     * The hard part is not the gesture, it is not firing it by accident: this
-     * pad's whole job is moving a cursor, and every cursor move is also a
-     * horizontal drag. So a pull has to be unmistakably deliberate — most of
-     * the way across the pad, decisively sideways rather than diagonal, and
-     * quick. A slow careful drag across the pad is someone aiming the cursor,
-     * and blacking the display out on them would be maddening.
-     *
-     * Not available while a browser window has the input: inside a window the
-     * page owns the gestures, which is the spec, and it also means a wearer
-     * reading a page cannot dim by scrolling enthusiastically.
+     * Dim used to live here too, as a pull-right — but a pad whose whole job
+     * is horizontal cursor drags kept colliding with it. Dim entry moved to
+     * the CURSOR's bottom edge (see [maybeAccumulateDimPull]): the cursor
+     * pinned at the bottom of the screen with the finger still pulling down
+     * is a place no aiming gesture ever goes, so the two cannot be confused.
      */
     private fun maybeHandleEdgePull(ev: MotionEvent) {
         val dx = ev.x - rightArmTouchDownX
@@ -2488,33 +2519,14 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val active = hudPinBoardController?.browserWindows()?.any { it.isActive } == true
-        if (active) return
-
-        val elapsed = SystemClock.uptimeMillis() - rightArmTouchDownMs
-        if (elapsed > EDGE_PULL_MAX_MS) return
-
-        // Pad coordinate space varies by unit, so the threshold is taken from
-        // the device's own reported range rather than a pixel count guessed
-        // from one pair of glasses.
-        val range = ev.device?.getMotionRange(MotionEvent.AXIS_X)?.range
-            ?: EDGE_PULL_FALLBACK_SPAN
-        val need = range * EDGE_PULL_SPAN_FRACTION
-        if (kotlin.math.abs(dx) < need) return
-        if (kotlin.math.abs(dx) < kotlin.math.abs(dy) * EDGE_PULL_STRAIGHTNESS) return
-
-        val dim = dimController ?: return
-        if (dx > 0f && !dim.isDimmed) {
-            Log.i(TAG, "Pull right — dimming")
-            dim.enter()
-        } else if (dx < 0f && dim.isDimmed) {
-            Log.i(TAG, "Pull left — undimming")
-            dim.exit()
-            setCursorVisible(true)
-        }
     }
 
     private fun moveCursorBy(dx: Float, dy: Float) {
+        // Dim means the pad is not a pointer: there is nothing to point at,
+        // and a cursor that woke on the first accidental brush would light
+        // the projector the wearer just turned off. Taps stay live — they
+        // are dim's only controls — this drops only the slides.
+        if (dimController?.isDimmed == true) return
         // Aiming at a key IS using the keyboard. Only key presses used to
         // reset the idle timer, so hunting for a letter by sliding — which
         // is the whole interaction on a trackpad — could time the keyboard
@@ -2528,12 +2540,65 @@ class MainActivity : AppCompatActivity() {
         setCursorVisible(true)
         updateCursorView()
         updateEdgeScroll()
+        maybeAccumulateDimPull(dy, maxH)
         // While a pin is being moved, the cursor IS the destination.
         hudPinBoardController?.let { c ->
             if (c.isInModifyMode()) {
                 val pt = cursorInteractionPoint()
                 c.updateMovePreview(pt.first, pt.second)
             }
+        }
+    }
+
+    // ── Dim entry: pull THROUGH the bottom edge ─────────────────────────
+    private var dimPullAccumPx = 0f
+    private var dimPullLastMs = 0L
+
+    /**
+     * Enter dim by pinning the cursor to the bottom of the screen and
+     * CONTINUING to pull down — a sustained overscroll, not an arrival.
+     *
+     * Reaching the bottom edge is an ordinary aiming outcome; blacking out
+     * the display for it would be maddening. What no aiming gesture ever
+     * does is keep dragging once the cursor has nowhere left to go, so the
+     * committed distance is measured only while pinned there, and only
+     * while the pull is CONTINUOUS — a pause longer than [DIM_PULL_GAP_MS]
+     * resets it, because "kept pulling without hesitating" is the signature
+     * of intent and "rested a finger at the edge" is not. A fast flick and
+     * a slow deliberate drag both cross the same distance; speed buys
+     * nothing but time.
+     *
+     * Unreachable — accumulator held at zero — whenever the pad belongs to
+     * someone else: a window with the input owns the gestures (a wearer
+     * scrolling a long page must not black themselves out), and MODIFY, the
+     * keyboard, and settings each own the pad while up.
+     */
+    private fun maybeAccumulateDimPull(dy: Float, maxH: Float) {
+        val dim = dimController ?: return
+        if (dim.isDimmed) return
+        val padOwned =
+            hudPinBoardController?.browserWindows()?.any { it.isActive } == true ||
+                hudPinBoardController?.isInModifyMode() == true ||
+                keyboardView?.visibility == View.VISIBLE ||
+                hubSettingsOverlay?.isShowing == true
+        if (padOwned) {
+            dimPullAccumPx = 0f
+            return
+        }
+        val atBottom = cursorY >= maxH - 1.5f
+        if (!atBottom) {
+            dimPullAccumPx = 0f
+            return
+        }
+        if (dy <= 0f) return
+        val now = SystemClock.uptimeMillis()
+        if (now - dimPullLastMs > DIM_PULL_GAP_MS) dimPullAccumPx = 0f
+        dimPullLastMs = now
+        dimPullAccumPx += dy
+        if (dimPullAccumPx >= DIM_PULL_THROUGH_PX) {
+            dimPullAccumPx = 0f
+            Log.i(TAG, "Bottom-edge pull-through — dimming")
+            dim.enter()
         }
     }
 
@@ -2567,6 +2632,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setCursorVisible(visible: Boolean) {
+        // While dimmed, "show the cursor" is refused AT THE SINK, not at
+        // each caller: the keyboard's dismissal path, the board's
+        // forceCursorVisible on every pin add — including the pin Gemini
+        // adds while working invisibly behind the black — and any future
+        // caller would each re-light an arrow over a display the wearer
+        // turned off. Undim passes here after isDimmed is already false.
+        if (visible && dimController?.isDimmed == true) return
         val cursor = findViewById<ImageView?>(R.id.cursorView) ?: return
         isCursorVisible = visible
         cursor.visibility = if (visible) View.VISIBLE else View.GONE
@@ -2745,6 +2817,10 @@ class MainActivity : AppCompatActivity() {
      * Everything else is cheap to undo, so it fires at once.
      */
     private fun tapNeedsDeferral(point: Pair<Float, Float>): Boolean {
+        // Dim has exactly two meanings — one tap wakes Gemini, three wake
+        // the display — so a single must wait out the streak window, or
+        // every triple to undim would also open a microphone behind it.
+        if (dimController?.isDimmed == true) return true
         if (hubSettingsOverlay?.isShowing == true) return false
         // MODIFY mode is the one place where ALL THREE counts mean something
         // different — one commits the move, two or three leave — so a tap
@@ -2806,6 +2882,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onRightArmTripleTap(point: Pair<Float, Float>? = null) {
+        // Dim: three taps wake the display, full stop — never settings,
+        // never window control. Those need eyes; this restores them.
+        dimController?.let { dim ->
+            if (dim.isDimmed) {
+                Log.i(TAG, "Triple-tap while dimmed — waking the display")
+                dim.exit()
+                setCursorVisible(true)
+                return
+            }
+        }
         stopEdgeScroll()
         val controller = hudPinBoardController
         val pt = point ?: cursorInteractionPoint()
@@ -2841,6 +2927,11 @@ class MainActivity : AppCompatActivity() {
      * the wrong place to land by accident.
      */
     private fun onRightArmDoubleTap(gapMs: Long, point: Pair<Float, Float>? = null) {
+        // Dim understands one tap and three; two is most likely a triple
+        // that lost its last beat, and answering it with the page agent —
+        // on a display showing nothing — would be an answer to a question
+        // nobody asked. Inert, so the wearer just taps again.
+        if (dimController?.isDimmed == true) return
         stopEdgeScroll()
         Log.i(TAG, "Right-arm double-tap (gap=${gapMs}ms)")
         val controller = hudPinBoardController
@@ -2941,6 +3032,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun performClickAtCursorInner(point: Pair<Float, Float>? = null) {
+        // Dim: a single tap means exactly one thing — wake Gemini — wherever
+        // the invisible cursor happens to be parked. No hit-testing against
+        // surfaces the wearer cannot see; an active session keeps the tap
+        // inert, since speech is the interface once the mic is open.
+        if (dimController?.isDimmed == true) {
+            if (HudStateBridge.current().phase == HudStateBridge.VoicePhase.IDLE) {
+                Log.i(TAG, "tap while dimmed → activate Gemini")
+                toggleGeminiSession()
+            }
+            return
+        }
         val pt = point ?: cursorInteractionPoint()
 
         // A browser window gets first refusal, because it is the only surface
@@ -3148,16 +3250,24 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_AGENT_TASK =
             "Tell me what is on this page and what I can do here."
 
-        /** A pull must cross this much of the pad to count. */
-        private const val EDGE_PULL_SPAN_FRACTION = 0.55f
-        /** …and be at least this many times more sideways than vertical. */
+        /** A resize swipe must be this many times more sideways than vertical. */
         private const val EDGE_PULL_STRAIGHTNESS = 2.5f
-        /** …and be a flick, not a slow aim. */
-        private const val EDGE_PULL_MAX_MS = 600L
-        /** Used only when the pad does not report an X range. */
-        private const val EDGE_PULL_FALLBACK_SPAN = 900f
-        /** A resize swipe is shorter than a dim pull: you are already in a mode. */
+        /** A resize swipe is short: you are already in a mode. */
         private const val RESIZE_SWIPE_MIN_PX = 120f
+
+        /**
+         * Cursor-px of CONTINUED downward pull, measured only while the
+         * cursor is pinned at the bottom edge, that enters dim. More than
+         * half a screen-height of overscroll: far past anything an aiming
+         * gesture produces, small enough to cross in one unhurried drag.
+         */
+        private const val DIM_PULL_THROUGH_PX = 260f
+
+        /**
+         * A pause longer than this resets the pull — continuity is the
+         * signature of intent; a finger resting at the edge is not one.
+         */
+        private const val DIM_PULL_GAP_MS = 400L
 
         /** y where under-HUD content starts (2 + 36px strip + gap). */
         private const val HUD_CONTENT_TOP = 46
