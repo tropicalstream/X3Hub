@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -51,6 +52,8 @@ import com.x3hub.app.core.tools.PageVision
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.CustomKeyboardView
 import com.x3hub.app.ui.DimController
+import com.x3hub.app.ui.DimActivityStatus
+import com.x3hub.app.ui.DimPullGesture
 import com.x3hub.app.BuildConfig
 import com.x3hub.app.core.agent.AgentSpeech
 import com.x3hub.app.core.agent.AgentTaskBridge
@@ -83,6 +86,9 @@ import com.x3hub.app.ui.HudPinBoardController
 class MainActivity : AppCompatActivity() {
 
     private val uiHandler = Handler(Looper.getMainLooper())
+    private val systemAudioManager: AudioManager by lazy {
+        getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    }
 
     // ── Service binding ───────────────────────────────────────────────
     @Volatile private var voiceServiceApi: VoiceServiceApi? = null
@@ -112,6 +118,7 @@ class MainActivity : AppCompatActivity() {
     private var isCursorVisible = false
     private var droppedFirstDelta = false
     private val cursorGain = 0.45f
+    private val dimPullGesture = DimPullGesture()
     private val hideCursorRunnable = Runnable { setCursorVisible(false) }
 
     // ── Right-arm tap state ──────────────────────────────────────────
@@ -1406,6 +1413,16 @@ class MainActivity : AppCompatActivity() {
                 // transform, so it also rewrites any CSS a probe injects —
                 // which makes "is dark mode what broke this page" impossible
                 // to answer from JS alone. This is the only way to ask.
+                intent?.getStringExtra("dimstatus")?.let {
+                    Log.i(
+                        TAG,
+                        "DEBUG dimstatus dimmed=${dimController?.isDimmed} " +
+                            "glyphs='${activityGlyphs()}' mediaMuted=${isSystemMediaMuted()} " +
+                            "phase=${HudStateBridge.current().phase} " +
+                            "agentBusy=${AgentActivityBridge.busy}"
+                    )
+                    return
+                }
                 intent?.getStringExtra("dimmode")?.let { want ->
                     // Drives the REAL controller, so the bridge flag, the
                     // cursor, the keyboard and the tap policy all follow —
@@ -1738,14 +1755,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * "Is anything happening?" as one or two characters beside the battery:
+     * Compact system state beside the battery:
      * ✦ while a Gemini session is live, ⚙ while the page agent works. Both
-     * can be true at once — an orchestrated errand is exactly that.
+     * can be true at once — an orchestrated errand is exactly that. M means
+     * Android's media stream is muted; unlike pausing a page, that state can
+     * survive dim/undim without touching any player or browser window.
      */
-    private fun activityGlyphs(): String = buildString {
-        if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) append('✦')
-        if (AgentActivityBridge.busy) append('⚙')
-    }
+    private fun activityGlyphs(): String = DimActivityStatus.glyphs(
+        geminiActive = HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE,
+        pageAgentBusy = AgentActivityBridge.busy,
+        mediaMuted = isSystemMediaMuted()
+    )
+
+    private fun isSystemMediaMuted(): Boolean =
+        runCatching { systemAudioManager.isStreamMute(AudioManager.STREAM_MUSIC) }.getOrDefault(false)
 
     private fun renderActivityGlyphs() {
         val tv = findViewById<TextView?>(R.id.unipanelHudActivity) ?: return
@@ -1754,7 +1777,7 @@ class MainActivity : AppCompatActivity() {
             tv.visibility = View.GONE
             return
         }
-        // Two states, two colours, one view: session cyan, agent a warm
+        // Three states, two colours, one view: session cyan, agent/mute a warm
         // white — distinguishable at a glance without reading anything.
         val styled = android.text.SpannableString(glyphs)
         var i = 0
@@ -1773,6 +1796,37 @@ class MainActivity : AppCompatActivity() {
         }
         tv.text = styled
         tv.visibility = View.VISIBLE
+    }
+
+    /**
+     * Toggle Android's MEDIA stream at the system mixer.
+     *
+     * Deliberately does not call pause(), touch WebView media state, abandon
+     * audio focus, or change a page's volume. Audio and video continue from
+     * the same position behind dim; only the OS output stream is silenced.
+     */
+    private fun toggleSystemMediaMute() {
+        val before = isSystemMediaMuted()
+        val direction = if (before) {
+            AudioManager.ADJUST_UNMUTE
+        } else {
+            AudioManager.ADJUST_MUTE
+        }
+        val result = runCatching {
+            systemAudioManager.adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                direction,
+                0 // No Android volume popup over the dim readout.
+            )
+        }
+        val after = isSystemMediaMuted()
+        if (result.isFailure || after == before) {
+            Log.w(TAG, "Dim double-tap media mute failed before=$before after=$after", result.exceptionOrNull())
+        } else {
+            Log.i(TAG, "Dim double-tap — system media ${if (after) "muted" else "unmuted"}")
+        }
+        renderActivityGlyphs()
+        dimController?.refreshReadout()
     }
 
     /**
@@ -2303,6 +2357,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleTrackpadCursorTouch(ev: MotionEvent) {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                dimPullGesture.beginGesture()
                 droppedFirstDelta = false
                 lastTrackpadX = ev.x
                 lastTrackpadY = ev.y
@@ -2354,12 +2409,13 @@ class MainActivity : AppCompatActivity() {
                 // froze the pointer wherever it happened to be — and on a
                 // display you aim with, a frozen pointer reads as a dead
                 // device. Scrolling is the edge bands' job now.
-                moveCursorBy(dx * cursorGain, dy * cursorGain)
+                moveCursorBy(dx * cursorGain, dy * cursorGain, ev.eventTime)
             }
             MotionEvent.ACTION_UP -> {
                 val tracking = rightArmTouchTracking
                 val moved = rightArmTouchMoved
                 rightArmTouchTracking = false
+                dimPullGesture.endGesture()
                 if (!tracking) return
                 if (moved) {
                     maybeHandleEdgePull(ev)
@@ -2371,6 +2427,7 @@ class MainActivity : AppCompatActivity() {
                 onRightArmTapUp(TapSource.TOUCH)
             }
             MotionEvent.ACTION_CANCEL -> {
+                dimPullGesture.endGesture()
                 rightArmTouchTracking = false
             }
         }
@@ -2575,7 +2632,7 @@ class MainActivity : AppCompatActivity() {
 
     }
 
-    private fun moveCursorBy(dx: Float, dy: Float) {
+    private fun moveCursorBy(dx: Float, dy: Float, eventTimeMs: Long) {
         // Dim means the pad is not a pointer: there is nothing to point at,
         // and a cursor that woke on the first accidental brush would light
         // the projector the wearer just turned off. Taps stay live — they
@@ -2589,12 +2646,13 @@ class MainActivity : AppCompatActivity() {
         val container = findViewById<View?>(R.id.mainContainer) ?: return
         val maxW = (container.width.takeIf { it > 0 } ?: 640).toFloat()
         val maxH = (container.height.takeIf { it > 0 } ?: 480).toFloat()
+        val cursorYBeforeMove = cursorY
         cursorX = (cursorX + dx).coerceIn(0f, maxW - 1f)
         cursorY = (cursorY + dy).coerceIn(0f, maxH - 1f)
         setCursorVisible(true)
         updateCursorView()
         updateEdgeScroll()
-        maybeAccumulateDimPull(dy, maxH)
+        maybeHandleDimPull(dx, dy, cursorYBeforeMove, maxH, eventTimeMs)
         // While a pin is being moved, the cursor IS the destination.
         hudPinBoardController?.let { c ->
             if (c.isInModifyMode()) {
@@ -2605,53 +2663,50 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ── Dim entry: pull THROUGH the bottom edge ─────────────────────────
-    private var dimPullAccumPx = 0f
-    private var dimPullLastMs = 0L
-
     /**
      * Enter dim by pinning the cursor to the bottom of the screen and
-     * CONTINUING to pull down — a sustained overscroll, not an arrival.
+     * CONTINUING to pull down — either one sustained overscroll or a
+     * decisive downward flick, never merely arriving at the edge.
      *
-     * Reaching the bottom edge is an ordinary aiming outcome; blacking out
-     * the display for it would be maddening. What no aiming gesture ever
-     * does is keep dragging once the cursor has nowhere left to go, so the
-     * committed distance is measured only while pinned there, and only
-     * while the pull is CONTINUOUS — a pause longer than [DIM_PULL_GAP_MS]
-     * resets it, because "kept pulling without hesitating" is the signature
-     * of intent and "rested a finger at the edge" is not. A fast flick and
-     * a slow deliberate drag both cross the same distance; speed buys
-     * nothing but time.
+     * The old accumulator counted the entire sample that happened to land at
+     * the bottom and survived a finger-up for 900ms. Two ordinary swipes could
+     * therefore add together and dim the glasses. This passes only the part of
+     * the delta that exists BEYOND the boundary to a per-touch tracker. Lifting,
+     * reversing, hesitating, or wandering sideways cancels that gesture's
+     * progress. See [DimPullGesture] for the independently tested thresholds.
      *
-     * Unreachable — accumulator held at zero — whenever the pad belongs to
-     * someone else: a window with the input owns the gestures (a wearer
-     * scrolling a long page must not black themselves out), and MODIFY, the
-     * keyboard, and settings each own the pad while up.
+     * It remains unreachable whenever the pad belongs to a browser window,
+     * MODIFY, the keyboard, or settings.
      */
-    private fun maybeAccumulateDimPull(dy: Float, maxH: Float) {
+    private fun maybeHandleDimPull(
+        dx: Float,
+        dy: Float,
+        cursorYBeforeMove: Float,
+        maxH: Float,
+        eventTimeMs: Long
+    ) {
         val dim = dimController ?: return
         if (dim.isDimmed) return
-        val padOwned =
-            hudPinBoardController?.browserWindows()?.any { it.isActive } == true ||
-                hudPinBoardController?.isInModifyMode() == true ||
-                keyboardView?.visibility == View.VISIBLE ||
-                hubSettingsOverlay?.isShowing == true
-        if (padOwned) {
-            dimPullAccumPx = 0f
-            return
-        }
-        val atBottom = cursorY >= maxH - 1.5f
-        if (!atBottom) {
-            dimPullAccumPx = 0f
-            return
-        }
-        if (dy <= 0f) return
-        val now = SystemClock.uptimeMillis()
-        if (now - dimPullLastMs > DIM_PULL_GAP_MS) dimPullAccumPx = 0f
-        dimPullLastMs = now
-        dimPullAccumPx += dy
-        if (dimPullAccumPx >= DIM_PULL_THROUGH_PX) {
-            dimPullAccumPx = 0f
-            Log.i(TAG, "Bottom-edge pull-through — dimming")
+        // An ACTIVE browser no longer owns trackpad slides: every slide moves
+        // the cursor and edge bands handle page scrolling. Keeping the old
+        // active-window gate here made dim unreachable in the most ordinary
+        // state — immediately after using a page. MODIFY, keyboard, and
+        // settings still genuinely own the pad and must suppress dim entry.
+        val eligible =
+            hudPinBoardController?.isInModifyMode() != true &&
+                keyboardView?.visibility != View.VISIBLE &&
+                hubSettingsOverlay?.isShowing != true
+        val bottomY = maxH - 1f
+        val trueOverscrollPx = (cursorYBeforeMove + dy - bottomY).coerceAtLeast(0f)
+        val trigger = dimPullGesture.update(
+            deltaX = dx,
+            deltaY = dy,
+            overscrollPx = trueOverscrollPx,
+            eligible = eligible,
+            nowMs = eventTimeMs
+        )
+        if (trigger != null) {
+            Log.i(TAG, "Bottom-edge ${trigger.logLabel} — dimming")
             dim.enter()
         }
     }
@@ -2981,11 +3036,13 @@ class MainActivity : AppCompatActivity() {
      * the wrong place to land by accident.
      */
     private fun onRightArmDoubleTap(gapMs: Long, point: Pair<Float, Float>? = null) {
-        // Dim understands one tap and three; two is most likely a triple
-        // that lost its last beat, and answering it with the page agent —
-        // on a display showing nothing — would be an answer to a question
-        // nobody asked. Inert, so the wearer just taps again.
-        if (dimController?.isDimmed == true) return
+        // In dim there is no visible surface to click and playback must keep
+        // running untouched. Double-tap therefore controls Android's media
+        // mixer directly: no WebView/player pause, seek, or focus changes.
+        if (dimController?.isDimmed == true) {
+            toggleSystemMediaMute()
+            return
+        }
         stopEdgeScroll()
         Log.i(TAG, "Right-arm double-tap (gap=${gapMs}ms)")
         val controller = hudPinBoardController
@@ -3308,28 +3365,6 @@ class MainActivity : AppCompatActivity() {
         private const val EDGE_PULL_STRAIGHTNESS = 2.5f
         /** A resize swipe is short: you are already in a mode. */
         private const val RESIZE_SWIPE_MIN_PX = 120f
-
-        /**
-         * Cursor-px of CONTINUED downward pull, measured only while the
-         * cursor is pinned at the bottom edge, that enters dim.
-         *
-         * Sized against the PAD, not the screen: at 0.45 cursor gain a full
-         * finger stroke down the temple pad yields roughly 200 cursor px,
-         * and part of every stroke is spent reaching the edge in the first
-         * place. The first cut asked for 260 — more overscroll than one
-         * stroke can physically contain, so the gesture was unenterable and
-         * measured exactly so on the glasses. 140 is far past aiming noise
-         * and comfortably inside one deliberate stroke.
-         */
-        private const val DIM_PULL_THROUGH_PX = 140f
-
-        /**
-         * A pause longer than this resets the pull. Long enough to survive
-         * the finger LIFTING AND RE-PLANTING mid-pull — on a pad this small
-         * a long pull is often two strokes — while a wearer who stops to
-         * think still starts over: continuity is the signature of intent.
-         */
-        private const val DIM_PULL_GAP_MS = 900L
 
         /** y where under-HUD content starts (2 + 36px strip + gap). */
         private const val HUD_CONTENT_TOP = 46
