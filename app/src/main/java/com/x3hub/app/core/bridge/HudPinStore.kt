@@ -268,10 +268,12 @@ object HudPinStore {
                 )
                 persist(next)
                 lastAddedPinId = existing.id
+                stampBrowserAdd(pin.type, existing.id)
             } else {
                 if (current.size >= MAX_PINS) return false
                 persist(current + pin)
                 lastAddedPinId = pin.id
+                stampBrowserAdd(pin.type, pin.id)
             }
         }
         notifyListeners()
@@ -358,6 +360,61 @@ object HudPinStore {
      */
     @Volatile var lastAddedPinId: String? = null
         private set
+
+    /**
+     * The last BROWSER pin asked for, and when, on the uptime clock —
+     * comparable with a window's lastFocusMs, so the picker can ask the
+     * only question that matters: which came later, the wearer's hand or
+     * the wearer's voice? A fixed ladder cannot answer that; whichever
+     * rung goes first is wrong half the time.
+     *
+     * Browser-only on purpose: the generic lastAddedPinId is restamped by
+     * EVERY add, so the app bookmarking a page — its own act, seconds after
+     * the wearer's — used to erase the voice claim and send the follow-up
+     * errand to whatever window the wearer's hand last touched.
+     */
+    @Volatile var lastAddedBrowserPinId: String? = null
+        private set
+
+    @Volatile var lastAddedBrowserAtMs: Long = 0L
+        private set
+
+    private fun stampBrowserAdd(type: String, id: String) {
+        // The one spelling of the type string lives in BrowserTool; a
+        // literal here would be a second one that could drift.
+        if (type == com.x3hub.app.core.tools.BrowserTool.TYPE_BROWSER) {
+            lastAddedBrowserPinId = id
+            lastAddedBrowserAtMs = android.os.SystemClock.uptimeMillis()
+        }
+    }
+
+    /**
+     * Re-point a browser pin at a new address — voice navigation
+     * REPURPOSES a window ("load radio garden in this window"), so the pin
+     * follows; click-drift inside a page deliberately does not touch it.
+     * Without this the board's payload record and the window's real
+     * document diverge, and everything keyed on payload — re-open dedupe,
+     * the one-player sweep — reasons from a stale address.
+     */
+    @Synchronized
+    fun repointBrowser(id: String, url: String, label: String?): Boolean {
+        val list = all().toMutableList()
+        val i = list.indexOfFirst { it.id == id }
+        if (i < 0) return false
+        val old = list[i]
+        if (old.payload == url && (label == null || label == old.label)) return true
+        list[i] = old.copy(
+            payload = url,
+            label = label ?: old.label,
+            lastUrl = url
+        )
+        cache = list
+        persist(list)
+        // Notify: the board reuses the cached window for a known id (no
+        // reload), and the rebuild is what refreshes the visible label.
+        notifyListeners()
+        return true
+    }
 
     /** Persist a manual move (overlay-space px). */
     fun updatePosition(id: String, x: Int, y: Int) {

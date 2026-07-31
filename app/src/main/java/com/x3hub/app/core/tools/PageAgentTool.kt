@@ -2,6 +2,7 @@ package com.x3hub.app.core.tools
 
 import android.content.Context
 import com.x3hub.app.core.agent.AgentTaskBridge
+import com.x3hub.app.core.bridge.HudPinStore
 
 /**
  * page_agent — hand a task to the agent living inside an open browser
@@ -11,7 +12,7 @@ import com.x3hub.app.core.agent.AgentTaskBridge
  * is the right default for a glance but cannot express an errand. This is
  * how a spoken errand gets there.
  */
-class PageAgentTool(@Suppress("unused") private val context: Context) : AiTapTool {
+class PageAgentTool(private val context: Context) : AiTapTool {
 
     override val name = "page_agent"
 
@@ -20,6 +21,17 @@ class PageAgentTool(@Suppress("unused") private val context: Context) : AiTapToo
         if (task.isBlank()) {
             return Result.failure(
                 IllegalArgumentException("Say what the agent should do on the page.")
+            )
+        }
+        // The bridge answers true whenever the activity is up — it says
+        // nothing about whether a page exists. With an empty board the
+        // errand used to die in a HUD notice the wearer cannot hear, AFTER
+        // the model had already been told "the agent is working on it".
+        HudPinStore.init(context)
+        if (BrowserTool.browserPins().isEmpty()) {
+            return Result.success(
+                "No page is open, so there is nothing for the agent to work on. " +
+                    "Open a browser window first, then hand the errand over."
             )
         }
         return if (AgentTaskBridge.request(task)) {

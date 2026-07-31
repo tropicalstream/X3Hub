@@ -82,15 +82,27 @@ class PageAgentController(
     fun run(task: String) {
         val provider = AgentProviders.provider(context)
         if (AgentProviders.key(context).isBlank()) {
-            showNotice("No ${provider.label} key — triple-tap for settings.")
+            refuse("No ${provider.label} key is set, so the page agent cannot run.")
             return
         }
         val url = window.currentUrl
         if (url.isNullOrBlank() || url.startsWith("about:")) {
-            showNotice("Open a page first, then ask the agent.")
+            refuse("The page has not loaded yet, so the agent has nothing to work on.")
             return
         }
         dispatch(task, retry = true, continuation = false)
+    }
+
+    /**
+     * A run that never starts still ENDS — through the same door a
+     * finished one uses. These bails were HUD notices only, and a wearer
+     * mid-conversation cannot see a notice: the orchestrator had been told
+     * the agent was working, held the session open for a report, and the
+     * report never came. Silence here is a broken promise upstream.
+     */
+    private fun refuse(message: String) {
+        showNotice(message.take(64))
+        onResult?.invoke(message, false)
     }
 
     fun stop() {

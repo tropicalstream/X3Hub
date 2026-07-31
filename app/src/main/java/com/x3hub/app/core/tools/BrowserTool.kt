@@ -1,13 +1,11 @@
 package com.x3hub.app.core.tools
 
 import android.content.Context
-import android.net.Uri
 import com.x3hub.app.core.agent.AgentTaskBridge
-import com.x3hub.app.core.agent.PageCommands
+import com.x3hub.app.core.agent.AgentTaskBridge.PageErrand
 import com.x3hub.app.core.web.LocalPages
+import com.x3hub.app.core.web.WebDestination
 import com.x3hub.app.core.bridge.HudPinStore
-import java.net.URLEncoder
-import java.util.Locale
 
 /**
  * open_browser — Gemini's way of putting a live web page on the HUD
@@ -52,107 +50,76 @@ class BrowserTool(private val context: Context) : AiTapTool {
         // about podcasts instead of that directory's own results.
         val site = arg(args, "site", "on", "where", "engine")
 
-        // "load it IN THIS WINDOW" — navigation, not creation. Board space
+        // "…and play the first one" — the part of the request that continues
+        // PAST opening, in the wearer's own words. Without this argument the
+        // verb had to be guessed, and it was guessed as "play" for every
+        // destination including encyclopedias.
+        val errandArg = arg(args, "errand", "then", "action")
+
+        // "load it IN THIS WINDOW" — placement, not destination. Board space
         // is three windows on a 640px eye; a wearer who says "in the
         // current window" is husbanding it, and opening a fourth surface
-        // they did not ask for spends what they were saving. The native
-        // router loads a URL in-window instantly, and the task listener
-        // already resolves "the current window" the same way every other
-        // this-page caller does.
+        // they did not ask for spends what they were saving.
         val inCurrent = arg(args, "window", "target", "destination")
             .lowercase().let { it.contains("current") || it.contains("same") || it.contains("this") }
-        if (inCurrent && url.isNotBlank()) {
-            val resolved = resolveUrl(url) ?: return Result.failure(
-                IllegalArgumentException("Can't load '$url' — give a normal web address.")
-            )
-            return if (AgentTaskBridge.request("go to $resolved")) {
-                Result.success("Loading ${hostLabel(resolved)} in the current window.")
-            } else {
-                Result.success("No window is open yet — opening one instead was needed.")
-            }
-        }
 
-        // A site with no search URL is not a web search — it is a page
-        // errand on that site. "A station on radio garden" used to become a
-        // DuckDuckGo search for the station's name; and when the window was
-        // not open yet, the first fix still fell through to that search,
-        // because it only knew how to use a window that already existed. If
-        // the site is open, the errand goes to its window; if the site is
-        // KNOWN but closed, it is opened and the errand follows it in — the
-        // listener's ensureLoaded holds the task until the page is there.
-        var followUpTask: String? = null
-        var followUpHint: String? = null
-        val siteStem = site.lowercase().replace(Regex("[^a-z0-9]"), "")
-        val siteSearchMiss = site.isNotBlank() && query.isNotBlank() &&
-            PageCommands.siteSearchUrl(site, query) == null
-        if (siteSearchMiss) {
-            val open = browserPins().firstOrNull {
-                siteStem.isNotEmpty() &&
-                    it.payload.lowercase().replace(Regex("[^a-z0-9]"), "").contains(siteStem)
-            }
-            if (open != null && AgentTaskBridge.request("play $query", windowHint = siteStem)) {
-                return Result.success(
-                    "Asking the ${open.label} page to play $query. The result will follow."
-                )
-            }
-            // Site closed but known by name: open it and defer the errand.
-            spokenHost(site)?.let {
-                followUpTask = "play $query"
-                followUpHint = siteStem
-            }
-        }
-
-        val target: String = when {
-            followUpTask != null -> "https://${spokenHost(site)}"
-            site.isNotBlank() && query.isNotBlank() ->
-                PageCommands.siteSearchUrl(site, query)
-                    // An unknown site is not a failure: searching the web for
-                    // "<query> <site>" is a reasonable answer, and far better
-                    // than refusing because the table has no entry.
-                    ?: searchUrl("$query $site")
-            url.isNotBlank() -> resolveUrl(url) ?: return Result.failure(
+        // ONE resolver, before any placement decision. Where the page shows
+        // up can choose a surface; it can never change where the wearer
+        // goes, what it is called, or what remains to be done there. Every
+        // bug of the "it worked until I said in this window" family was a
+        // second, weaker resolver hiding inside a placement branch.
+        val dest = WebDestination.resolve(url, site, query, errandArg)
+            ?: return Result.failure(
                 IllegalArgumentException(
                     "Can't open '$url' — only http and https pages work here. " +
                         "Give a normal web address, or pass 'query' to search instead."
                 )
             )
-            // A query that is really a site's NAME opens the site. "Open
-            // radio for all" reaches this tool as a query, because with no
-            // "dot" in it the model has nothing to call a URL — and a web
-            // search ABOUT radio4all.net is never what naming it meant.
-            query.isNotBlank() ->
-                spokenHost(query)?.let { "https://$it" } ?: searchUrl(query)
-            // Neither argument given ("open a browser"). The home page is the
-            // search engine, so the user lands somewhere they can act from.
-            else -> HOME_URL
-        }
 
-        val label = when {
-            // The player is "Podcasts" wherever it came from — its host is
-            // an implementation detail nobody said out loud.
-            target.startsWith(LocalPages.PLAYER_URL) -> "Podcasts"
-            site.isNotBlank() && query.isNotBlank() -> shortLabel(query)
-            url.isNotBlank() -> hostLabel(target)
-            query.isNotBlank() -> shortLabel(query)
-            else -> "web"
+        // --- Placement: the window the wearer is already using. ---
+        // Only an instruction when there IS one: on an empty board this
+        // falls through to the open path, which is what was wanted anyway —
+        // the ask is to not spawn ANOTHER window, and none → one doesn't.
+        if (inCurrent && browserPins().isNotEmpty()) {
+            val sent = AgentTaskBridge.request(
+                PageErrand(navigateTo = dest.url, task = dest.errand)
+            )
+            if (sent) {
+                return Result.success(
+                    "Loading ${dest.label} in the current window" +
+                        (dest.errand?.let { " and asking it to $it. The result will follow" }
+                            ?: "") + "."
+                )
+            }
+            // No activity listening — open normally below rather than
+            // promising a navigation nothing will perform.
         }
 
         // ONE player window. A new search would otherwise open a second
         // player beside the first (different ?q= means a different payload,
         // which defeats the store's own dedupe), and two players both
-        // holding an <audio> is a recipe for a duet.
-        if (target.startsWith(LocalPages.PLAYER_URL)) {
+        // holding an <audio> is a recipe for a duet. The listener enforces
+        // the same rule for in-current navigations, where no pin is written.
+        if (dest.url.startsWith(LocalPages.PLAYER_URL)) {
             browserPins()
-                .filter { it.payload.startsWith(LocalPages.PLAYER_URL) && it.payload != target }
+                .filter { it.payload.startsWith(LocalPages.PLAYER_URL) && it.payload != dest.url }
                 .forEach { HudPinStore.remove(it.id) }
         }
 
         val open = browserPins()
-        val alreadyOpen = open.firstOrNull { it.payload == target }
-        if (alreadyOpen == null && open.size >= MAX_BROWSER_WINDOWS) {
+        val alreadyOpen = open.firstOrNull { it.payload == dest.url }
+        // The site's window, even when it has wandered off the exact
+        // address: "play X on radio garden" while its window sits on a deep
+        // station page used to count as a NEW window — and at the cap, the
+        // request was refused with the site sitting right there.
+        val sameSite = alreadyOpen
+            ?: open.firstOrNull { WebDestination.sameHost(it.payload, dest.url) }
+        if (sameSite == null && open.size >= MAX_BROWSER_WINDOWS) {
             // Each window is a full WebView — renderer process, network
             // stack, its own JS heap — and three of them already cover most
             // of a 640×480 eye. Refusing out loud beats quietly thrashing.
+            // Before any dispatch, deliberately: a refused window must not
+            // leave an errand running loose looking for a surface.
             return Result.success(
                 "There are already $MAX_BROWSER_WINDOWS browser windows open (" +
                     open.joinToString(", ") { it.label } + "). Ask the user to close one " +
@@ -160,50 +127,86 @@ class BrowserTool(private val context: Context) : AiTapTool {
             )
         }
 
-        val added = HudPinStore.add(
-            HudPinStore.HudPin(
-                type = TYPE_BROWSER,
-                label = label,
-                payload = target,
-                // Re-opening a URL that is already on the board replaces the
-                // existing pin in place (HudPinStore.add dedupes on type +
-                // payload), and a replacement carries the NEW pin's fields.
-                // Carrying the old size index forward is what stops "open
-                // archive.org" from silently shrinking a window the user
-                // had already resized.
-                // Keep the size the wearer had already chosen, but let a
-                // fresh request restate the appearance — asking for the same
-                // page "in light mode" has to mean something.
-                content = encodeSizeIndex(
-                    alreadyOpen?.let { sizeIndexOf(it) } ?: BASE_SIZE_INDEX,
-                    light = light
+        val pinId: String?
+        if (sameSite != null && alreadyOpen == null) {
+            // Reuse the site's window rather than opening a sibling. No
+            // store write here — the payload differs, so add() would mint a
+            // second pin; the listener re-points the pin when it navigates.
+            pinId = sameSite.id
+        } else {
+            val added = HudPinStore.add(
+                HudPinStore.HudPin(
+                    type = TYPE_BROWSER,
+                    label = dest.label,
+                    payload = dest.url,
+                    // Re-opening a URL that is already on the board replaces the
+                    // existing pin in place (HudPinStore.add dedupes on type +
+                    // payload), and a replacement carries the NEW pin's fields.
+                    // Carrying the old size index forward is what stops "open
+                    // archive.org" from silently shrinking a window the user
+                    // had already resized.
+                    // Keep the size the wearer had already chosen, but let a
+                    // fresh request restate the appearance — asking for the same
+                    // page "in light mode" has to mean something.
+                    content = encodeSizeIndex(
+                        alreadyOpen?.let { sizeIndexOf(it) } ?: BASE_SIZE_INDEX,
+                        light = light
+                    )
                 )
             )
-        )
-        if (!added) {
-            // The 10-pin board cap, not the browser cap — notes and cards
-            // filled it. Name the difference so the model gives useful advice.
-            return Result.success(
-                "The HUD board is full (${HudPinStore.MAX_PINS} pins), so there's no room " +
-                    "for a browser window. Ask the user which pin to remove first."
-            )
+            if (!added) {
+                // The 10-pin board cap, not the browser cap — notes and cards
+                // filled it. Name the difference so the model gives useful advice.
+                return Result.success(
+                    "The HUD board is full (${HudPinStore.MAX_PINS} pins), so there's no " +
+                        "room for a browser window. Ask the user which pin to remove first."
+                )
+            }
+            pinId = alreadyOpen?.id ?: HudPinStore.lastAddedBrowserPinId
         }
 
-        // The deferred errand rides in AFTER the pin exists, so the task
-        // listener's lastAddedPinId resolution points at this very window
-        // and its ensureLoaded holds the task until the page is ready.
-        followUpTask?.let { t ->
-            AgentTaskBridge.request(t, windowHint = followUpHint)
+        // --- Placement: an existing window, or the one just created. ---
+        // A REUSED window is never navigated by the store — the board's
+        // getOrPut returns the cached view — so it must be sent to the
+        // destination explicitly, or "open archive.org" visibly does
+        // nothing. A FRESH window loads its payload itself; only the errand
+        // rides, and the listener holds it until the document is really
+        // there. Both are addressed by pin IDENTITY, not by name: a name
+        // match fails exactly when the window has not loaded yet or the URL
+        // does not spell the site's name.
+        val needsNav = sameSite != null
+        if (needsNav || dest.errand != null) {
+            val sent = AgentTaskBridge.request(
+                PageErrand(
+                    navigateTo = if (needsNav) dest.url else null,
+                    task = dest.errand,
+                    windowPinId = pinId
+                )
+            )
+            if (!sent && dest.errand != null) {
+                // The pin exists but nothing is listening — say what
+                // actually happened instead of promising a result.
+                return Result.success(
+                    "Opened ${dest.label}, but the page errand could not be handed over."
+                )
+            }
+        }
+
+        if (dest.errand != null) {
             return Result.success(
-                "Opening ${hostLabel(target)} and asking it to play $query. " +
+                "Opening ${dest.label} and asking it to ${dest.errand}. " +
                     "The result will follow."
             )
         }
 
-        val where = when {
-            url.isNotBlank() -> "on $label"
-            query.isNotBlank() -> "searching for $query"
-            else -> "on the search page"
+        // Phrased from HOW the destination resolved, not from which argument
+        // happened to carry it: "searching for X" was once spoken when the
+        // tool had in fact opened X's own site and run no search at all.
+        val where = when (dest.kind) {
+            WebDestination.Kind.SITE_SEARCH -> "searching for $query"
+            WebDestination.Kind.WEB_SEARCH -> "searching the web"
+            WebDestination.Kind.DIRECT -> "on ${dest.label}"
+            WebDestination.Kind.HOME -> "on the search page"
         }
         // Spoken aloud verbatim, so: one sentence, no punctuation the TTS has
         // to guess at. The interaction hint rides along only on the first
@@ -234,95 +237,9 @@ class BrowserTool(private val context: Context) : AiTapTool {
     private fun clean(raw: String): String =
         raw.trim().trim('"', '\'', '“', '”', '‘', '’').trim().trimEnd('.').trim()
 
-    // ------------------------------------------------------------------
-    // URL resolution
-    // ------------------------------------------------------------------
-
-    /**
-     * Normalise what the model called a URL, or return null when it is not
-     * safe to load.
-     *
-     * Only http and https survive. The model is frequently repeating text it
-     * read off a web page, so javascript:, data:, file:, intent: and content:
-     * are all reachable from untrusted input — and each of them, handed to a
-     * WebView, does something considerably worse than show a page.
-     */
-    private fun resolveUrl(raw: String): String? {
-        val s = raw.trim()
-        if (s.isEmpty()) return null
-        val schemeEnd = s.indexOf("://")
-        if (schemeEnd > 0) {
-            val scheme = s.substring(0, schemeEnd).lowercase(Locale.US)
-            return if (scheme == "http" || scheme == "https") s else null
-        }
-        spokenHost(s)?.let { return "https://$it" }
-        // Bare host, with or without a path: "archive.org", "bbc.co.uk/news".
-        // The pattern also rejects the slash-less schemes — "javascript:…",
-        // "data:…", "intent:…" — since it permits a colon only in front of a
-        // port number.
-        if (!HOST_RE.matches(s)) return null
-        return "https://$s"
-    }
-
-    /**
-     * A domain the wearer SAID, rather than one anybody would type.
-     *
-     * Speech has no full stops and no digits: "radio4all.net" is heard as
-     * "radio for all dot net", which is not a host by any pattern, so it
-     * used to fall through to a web search — the wearer names a site and
-     * gets a results page for it.
-     *
-     * Two steps. Spoken "dot" becomes a real dot and the spaces close up,
-     * which alone rescues anything whose letters survive dictation. Then a
-     * table catches the rest: numbers spoken as words, where "4" reaches us
-     * as "for" or "four" and no rule can tell that from an actual word.
-     *
-     * Only text that LOOKS dictated is touched — it must contain a spoken
-     * "dot" or match the table outright — so "cats" still searches for cats.
-     */
-    private fun spokenHost(raw: String): String? {
-        val lower = raw.lowercase(Locale.US).trim().trimEnd('.', '!', '?')
-        val joined = lower
-            .replace(Regex("\\s+dot\\s+"), ".")
-            .replace(Regex("\\s+"), "")
-        SPOKEN_SITES[joined]?.let { return it }
-        // The SUFFIX is a guess too, and a wrong one is invisible: asked for
-        // radio4all.net the model offered radioforall.org, which is
-        // well-formed, passes every check, and does not resolve at all —
-        // measured, it answers nothing. Having corrected the name, correct it
-        // whatever ending was attached.
-        if (joined.contains('.')) {
-            SPOKEN_SITES[joined.substringBeforeLast('.')]?.let { return it }
-        }
-        // No spoken "dot" means this was never a dictated address; leave it
-        // to the search path rather than guessing a host out of prose.
-        if (!Regex("\\s+dot\\s+").containsMatchIn(lower)) return null
-        if (!HOST_RE.matches(joined)) return null
-        // The last part has to be a REAL suffix, because "dot" is an
-        // ordinary English word and the shape alone proves nothing. Simulated
-        // over the phrasings a wearer actually produces, the bare pattern
-        // turned "what is the dot product" into whatisthe.product and
-        // "podcasts about dot net framework" into podcastsabout.netframework
-        // — both perfectly valid-looking hosts, both nonsense, and both
-        // stealing a question that should have been a search.
-        val tld = joined.substringAfterLast('.').substringBefore('/').substringBefore(':')
-        return joined.takeIf { tld in SPOKEN_TLDS }
-    }
-
-    private fun searchUrl(query: String): String =
-        SEARCH_PREFIX + URLEncoder.encode(query.trim(), "UTF-8")
-
-    /** "https://www.bbc.co.uk/news" → "bbc.co.uk". Falls back to the raw text. */
-    private fun hostLabel(url: String): String {
-        val host = runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
-        val stripped = host.removePrefix("www.").trimEnd('.')
-        return stripped.ifBlank { url.removePrefix("https://").removePrefix("http://") }
-            .take(LABEL_MAX_CHARS)
-    }
-
-    /** Three words is what fits a window title strip at this size. */
-    private fun shortLabel(text: String): String =
-        text.trim().split(Regex("\\s+")).take(3).joinToString(" ").take(LABEL_MAX_CHARS)
+    // URL resolution, spoken-host repair, labels: all in WebDestination.
+    // Deliberately NOT here — a second copy in this file is exactly the
+    // defect this layout replaced.
 
     companion object {
 
@@ -341,12 +258,6 @@ class BrowserTool(private val context: Context) : AiTapTool {
          * through their own UI.
          */
         const val MAX_BROWSER_WINDOWS = 3
-
-        /** SmartView's default engine, and its home page. */
-        const val HOME_URL = "https://duckduckgo.com/"
-        private const val SEARCH_PREFIX = "https://duckduckgo.com/?q="
-
-        private const val LABEL_MAX_CHARS = 24
 
         /**
          * Window widths in LOGICAL viewport px (the overlay's 640×480 space,
@@ -419,67 +330,5 @@ class BrowserTool(private val context: Context) : AiTapTool {
             HudPinStore.all().filter { it.type == TYPE_BROWSER }
 
         fun isBrowserPin(pin: HudPinStore.HudPin): Boolean = pin.type == TYPE_BROWSER
-
-        /**
-         * Host, optionally with a path — deliberately no scheme, no spaces,
-         * and a real TLD, so free-text queries ("cuttlefish facts") fall
-         * through to search instead of becoming https://cuttlefish facts.
-         */
-        /**
-         * Dictated forms that no amount of pattern-matching can repair,
-         * because the mangling is a real English word. Keyed on the text
-         * after "dot" has been turned into a dot and the spaces closed up,
-         * so one entry covers every spacing the transcriber produces.
-         */
-        private val SPOKEN_SITES = mapOf(
-            // radio4all.net — "4" is heard as "for", occasionally "four",
-            // and the wearer may or may not say the ".net" at all.
-            "radioforall.net" to "www.radio4all.net",
-            "radiofourall.net" to "www.radio4all.net",
-            "radioforall" to "www.radio4all.net",
-            "radiofourall" to "www.radio4all.net",
-            "radio4all" to "www.radio4all.net",
-            // radio.garden puts its name ACROSS the dot, so "radio garden"
-            // closes up to radiogarden and the obvious guess is .com. That
-            // guess is not the site: measured, radiogarden.com answers 410
-            // and redirects to a domain-for-sale listing, which is the blank
-            // window the wearer was looking at. The correction has to apply
-            // even though radiogarden.com is a perfectly well-formed host —
-            // being well-formed is exactly what made it convincing.
-            "radiogarden" to "radio.garden",
-            "radiogarden.com" to "radio.garden",
-            "radiogarden.net" to "radio.garden",
-            "radiogarden.org" to "radio.garden",
-            // The podcast names all land on the app's own player page. The
-            // real sites were measured unusable in a window this size —
-            // listennotes lays out 564px wide whatever it is told, podchaser
-            // never hydrates at all — so "open listen notes" means "I want
-            // podcasts", and the player is the thing here that can do that.
-            "listennotes" to "x3hub.local/podplayer.html",
-            "podchaser" to "x3hub.local/podplayer.html",
-            "podcasts" to "x3hub.local/podplayer.html",
-            "podcast" to "x3hub.local/podplayer.html",
-            "podcastplayer" to "x3hub.local/podplayer.html"
-        )
-
-        /**
-         * Suffixes a dictated address may end in. A allowlist rather than a
-         * pattern because "dot" is a common English word and the shape of a
-         * host proves nothing on its own — see [spokenHost]. Deliberately
-         * short: a miss costs one web search, a false positive costs the
-         * wearer their answer.
-         */
-        private val SPOKEN_TLDS = setOf(
-            "com", "net", "org", "edu", "gov", "mil", "int",
-            "io", "ai", "app", "dev", "co", "me", "tv", "fm", "cc", "xyz",
-            "info", "biz", "news", "radio", "garden", "live", "media",
-            "uk", "us", "ca", "au", "de", "fr", "es", "it", "nl", "se",
-            "no", "fi", "dk", "pl", "ru", "jp", "cn", "in", "br", "mx", "nz"
-        )
-
-        private val HOST_RE = Regex(
-            "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}(?::\\d{1,5})?(?:/\\S*)?$",
-            RegexOption.IGNORE_CASE
-        )
     }
 }

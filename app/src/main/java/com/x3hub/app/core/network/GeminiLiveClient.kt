@@ -92,9 +92,12 @@ class GeminiLiveClient(
                 "the one-click hint is only for when opening the page WAS the whole " +
                 "request). A watched live failure: asked to play the user's purchases, " +
                 "the model opened the site, said so, and stopped — the second step never " +
-                "came. 'Play some jazz " +
-                "podcasts' = open_browser(site podcasts, query jazz) then page_agent('play " +
-                "the first episode') in the same turn. 'Find X on that page and play it' = page_agent with " +
+                "came. When one request BOTH opens a page and acts on it, put the acting " +
+                "part in open_browser's errand argument — ONE call: 'Play some jazz " +
+                "podcasts' = open_browser(site podcasts, query jazz, errand 'play the " +
+                "first episode'). The errand runs on the right window automatically, " +
+                "which a separate page_agent call can only guess at. " +
+                "'Find X on that page and play it' = page_agent with " +
                 "the whole errand in one task. The agent CANNOT hear the user and knows " +
                 "nothing you do not write in the task — so spell out names fully, with " +
                 "the host or artist when you know it: 'play the newest episode of " +
@@ -103,10 +106,11 @@ class GeminiLiveClient(
                 "once played a sound-alike that had been dead for years. " +
                 "THE USER'S OWN THINGS ON A SITE — purchases, collection, library, " +
                 "wishlist, playlists, subscriptions, history — are NEVER search queries: " +
-                "'play my purchases on bandcamp' means open_browser(url bandcamp.com) then " +
-                "page_agent('play my purchases'), because searching a store " +
+                "'play my purchases on bandcamp' means open_browser(url bandcamp.com, " +
+                "errand 'play my purchases'), because searching a store " +
                 "for the word purchases returns strangers' albums that happen to carry " +
-                "that name. Personal-library errands go to page_agent, always. " +
+                "that name. Personal-library requests ride as an errand (or go to " +
+                "page_agent when the page is already open), never as a query. " +
                 "After dispatching page_agent say only that " +
                 "the agent is on it — the agent works for up to a minute, so WAIT; never " +
                 "invent its outcome. Its result then arrives as a message starting " +
@@ -119,8 +123,9 @@ class GeminiLiveClient(
                 "show, look at, read, watch or play anything on the web ('open Wikipedia', " +
                 "'pull up the news', 'show me that on YouTube'), CALL THIS TOOL rather than " +
                 "describing the page aloud. Pass 'url' when a specific site is named, or " +
-                "'query' to search. The window opens inert; say in one short sentence that it " +
-                "is open and that a single click activates it.\n" +
+                "'query' to search. With no errand the window opens inert; say in one short " +
+                "sentence that it is open and that a single click activates it. With an " +
+                "errand it activates itself — no click to mention.\n" +
                 "- read_page: READ OR LOOK AT THE PAGE THE USER IS LOOKING AT. If the " +
                 "window is a picture, this sends you the image itself — so when they ask " +
                 "what something on their screen is, CALL IT rather than guessing or " +
@@ -629,8 +634,10 @@ class GeminiLiveClient(
                     "so the site's own results open rather than a web search about it. " +
                     "With none of them, a search home page opens. " +
                     "At most three windows can be open at once; opening a fourth is refused, " +
-                    "so offer to close one. The window opens INERT — after it returns, say in " +
-                    "one short sentence that it is open and that one click activates it.")
+                    "so offer to close one. With no errand, the window opens INERT — say in " +
+                    "one short sentence that it is open and that one click activates it. " +
+                    "With an errand, the window activates itself and the result follows — " +
+                    "do not mention clicking.")
             .put("parameters", JSONObject()
                 .put("type", "OBJECT")
                 .put("properties", JSONObject()
@@ -654,9 +661,24 @@ class GeminiLiveClient(
                                 "subject: 'podcasts' (also listennotes or podchaser — all " +
                                 "three open the built-in podcast player), 'bandcamp', " +
                                 "'youtube', 'wikipedia', 'archive', 'reddit', 'github', " +
-                                "'ebay', 'amazon'. Pair it with 'query'. Prefer this over " +
-                                "building a search URL yourself — the site's real search " +
-                                "address is known here and guessing one tends to miss."
+                                "'ebay', 'amazon', 'radio garden', 'radio4all'. Pair it " +
+                                "with 'query'. Prefer this over building a search URL " +
+                                "yourself — the site's real search address is known here " +
+                                "and guessing one tends to miss. site and query behave " +
+                                "IDENTICALLY with window 'current': same destination, " +
+                                "just no new window."
+                        ))
+                    .put("errand", JSONObject().put("type", "STRING")
+                        .put(
+                            "description",
+                            "What to do on the page once it is open, in the user's own " +
+                                "words WITH NAMES FILLED IN — the part of their request " +
+                                "that continues past opening: 'play the newest episode of " +
+                                "StarTalk Radio', 'play my purchases'. Name the actual " +
+                                "thing, never a placeholder. Runs on the page after it " +
+                                "loads, so one call covers 'open X and do Y' — no second " +
+                                "tool call needed. Leave it out when opening IS the whole " +
+                                "request."
                         ))
                     .put("mode", JSONObject().put("type", "STRING")
                         .put(

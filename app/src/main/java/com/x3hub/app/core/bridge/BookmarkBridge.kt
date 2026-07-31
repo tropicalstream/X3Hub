@@ -21,7 +21,14 @@ import kotlin.coroutines.resume
  */
 object BookmarkBridge {
 
-    data class Saved(val ok: Boolean, val title: String? = null, val error: String? = null)
+    data class Saved(
+        val ok: Boolean,
+        val title: String? = null,
+        val error: String? = null,
+        /** Whether a HUD pin was actually created — the spoken reply must not
+         * claim one that was not: the wearer will go looking for it. */
+        val pinned: Boolean = false,
+    )
 
     /** The activity's side: do the work, then call back exactly once. */
     @Volatile private var handler: ((reply: (Saved) -> Unit) -> Unit)? = null

@@ -56,6 +56,8 @@ import com.x3hub.app.core.agent.AgentSpeech
 import com.x3hub.app.core.agent.AgentTaskBridge
 import com.x3hub.app.core.agent.AgentVoice
 import com.x3hub.app.core.web.AdBlock
+import com.x3hub.app.core.web.LocalPages
+import com.x3hub.app.core.web.WebDestination
 import com.x3hub.app.core.agent.PageAgentController
 import com.x3hub.app.core.agent.PageCommands
 import com.x3hub.app.ui.HubSettingsOverlay
@@ -322,24 +324,19 @@ class MainActivity : AppCompatActivity() {
      * The window the wearer means when they say "this page", or null only
      * when there genuinely is not one.
      *
-     * Preference order, and each step exists because the one above it can
-     * legitimately be absent:
+     * One window answers itself. With several, there are exactly two ways a
+     * wearer picks one — with their HAND (a click or a modify; only genuine
+     * wearer acts set lastFocusMs now) and with their VOICE (open_browser
+     * stamps the store with the pin and the moment). The more RECENT act
+     * wins, because it is the more recent statement of intent.
      *
-     *  1. The SELECTED window (cyan border). Unambiguous — the wearer is
-     *     driving it right now.
-     *  2. The only window, selected or not. Nothing to confuse it with.
-     *  3. The one the wearer most recently opened, clicked, or moved.
-     *
-     * Step 3 is the one that was missing, and it cost a real failure: "pin
-     * this page" answered "you don't have a web page open" to a wearer
-     * looking at two. Nothing-selected is not an exotic state — measured on
-     * device, every window RESTORED at startup comes back INERT, so the
-     * board sits there with three windows and no selection until the wearer
-     * happens to click one. Leaving MODIFY lands in INERT too. Selection is
-     * about which window takes your swipes; it was never meant to be the
-     * whole answer to which page you are talking about, and treating its
-     * absence as "no page" turned the ordinary resting state of a restored
-     * board into a dead end for every voice tool at once.
+     * It used to be a fixed ladder, active-window first, and that failed in
+     * both directions at different times: treating no-selection as no-page
+     * answered "you don't have a web page open" to a wearer looking at two
+     * (every window RESTORED at startup comes back INERT), and active-first
+     * made every errand sticky — the dispatcher activated the window it
+     * picked, so the NEXT errand went there too, whatever the wearer had
+     * opened in between.
      *
      * Guessing here is safe in the way that matters: every tool that uses
      * this NAMES the page it acted on in its spoken reply, so a wrong guess
@@ -348,18 +345,259 @@ class MainActivity : AppCompatActivity() {
     private fun pickedWindow(): BrowserWindowView? {
         val c = hudPinBoardController ?: return null
         val all = c.browserWindows()
-        return all.firstOrNull { it.isActive }
-            ?: all.singleOrNull()
-            // The window most recently ASKED FOR through the store — the
-            // step recency cannot cover, because a re-opened pin reuses its
-            // window without touching it. "Open bandcamp… read it to me"
-            // must mean the bandcamp window, not whichever window the
-            // wearer's hand last brushed.
-            ?: HudPinStore.lastAddedPinId?.let { id ->
-                c.browserWindowEntries().firstOrNull { it.first == id }?.second
-            }
-            ?: all.maxByOrNull { it.lastFocusMs }
+        all.singleOrNull()?.let { return it }
+        // Two competing claims to "the current window": the wearer's hand
+        // (a click or a modify sets lastFocusMs — nothing else does) and
+        // the wearer's voice (open_browser stamps the store). WHICHEVER
+        // CAME LATER wins. A fixed ladder cannot express that: active-first
+        // made every errand sticky to the window the previous errand had
+        // activated, so the second errand of a session was about the first
+        // one's page no matter what the wearer said in between.
+        val byStore = HudPinStore.lastAddedBrowserPinId?.let { id ->
+            c.browserWindowEntries().firstOrNull { it.first == id }?.second
+        }
+        val byFocus = all.maxByOrNull { it.lastFocusMs }
+        return when {
+            byStore == null -> byFocus ?: all.firstOrNull()
+            byFocus == null -> byStore
+            HudPinStore.lastAddedBrowserAtMs >= byFocus.lastFocusMs -> byStore
+            else -> byFocus
+        }
     }
+
+    /**
+     * Generation stamp for page errands. The bridge is documented
+     * last-write-wins; this is what implements it: every deferred callback
+     * an errand arms (document-ready, navigation settle, retry) checks the
+     * stamp and goes quiet when a newer errand has taken the board —
+     * without it, two errands in quick succession BOTH fired on the second
+     * one's page.
+     */
+    private var errandSeq = 0
+
+    /**
+     * One page errand, one window, and the truth about what happened.
+     *
+     * Ordering of window resolution: pin IDENTITY from the caller beats a
+     * NAME hint beats the picker's heuristics. The name hint used to be
+     * first and it fails exactly when it matters — matched against the live
+     * URL, it misses a window that has not loaded yet and a site whose URL
+     * does not spell its name.
+     *
+     * Navigation is performed HERE, not by shipping "go to X" through the
+     * command router — that string round-trip was a third resolver, and its
+     * page-change gate never fired when the window was already at the
+     * destination. The follow-up task is gated on the load THIS function
+     * issues; a bounded timeout keeps a dead network from stranding an
+     * errand the wearer has already been promised.
+     */
+    private fun handlePageErrand(errand: AgentTaskBridge.PageErrand, attempt: Int = 0) {
+        val myTurn = if (attempt == 0) ++errandSeq else errandSeq
+        val c = hudPinBoardController
+        val byId = errand.windowPinId?.let { id ->
+            c?.browserWindowEntries()?.firstOrNull { it.first == id }?.second
+        }
+        // Matched with non-alphanumerics stripped, because speech says
+        // "radio garden" and the URL spells "radio.garden".
+        fun squash(s: String?) = (s ?: "").lowercase().replace(Regex("[^a-z0-9]"), "")
+        val hinted = byId ?: errand.windowHint?.takeIf { it.isNotBlank() }?.let { h ->
+            val hs = squash(h)
+            c?.browserWindows()?.firstOrNull {
+                hs.isNotEmpty() && squash(it.currentUrl).contains(hs)
+            }
+        }
+        val target = hinted ?: pickedWindow()
+        if (target == null) {
+            // A cold board inflates its windows a beat after the store
+            // write — the board render defers itself until it has a
+            // layout. An errand arriving in that beat is EARLY, not wrong:
+            // retry briefly before declaring failure to a wearer whose
+            // window is materialising as we speak.
+            if (attempt < 6 && (errand.windowPinId != null ||
+                    BrowserTool.browserPins().isNotEmpty())
+            ) {
+                uiHandler.postDelayed({
+                    if (myTurn == errandSeq) handlePageErrand(errand, attempt + 1)
+                }, 350L)
+                return
+            }
+            showNotice("Open a page first, then give the agent a task.")
+            // The wearer cannot see a HUD notice mid-conversation — the
+            // session must HEAR the failure or the model invents a success.
+            reportErrandOutcome("No browser window is open — open a page first.", failed = true)
+            return
+        }
+        // Superseded or gone: every deferred continuation below checks this
+        // before acting, so a stale errand can neither fire on the next
+        // errand's page nor dispatch into a window the wearer closed.
+        fun stillMine(): Boolean =
+            myTurn == errandSeq &&
+                hudPinBoardController?.browserWindows()?.any { it === target } == true
+        c?.browserWindows()?.forEach { if (it !== target) it.deactivate() }
+        // A task dispatched mid-session is an errand the session is waiting
+        // on: the tool reply comes back instantly, the turn completes, and
+        // the 5s between-turn clock would close the conversation under a
+        // 30-second errand. The hold is a deadline, not a flag — a wedged
+        // agent costs at most its own timeout, and completion releases it.
+        if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) {
+            runCatching { voiceServiceApi?.holdSessionOpen(90_000L) }
+        }
+        val nav = errand.navigateTo
+        val task = errand.task
+        fun norm(u: String?) = (u ?: "").substringBefore('#').trimEnd('/')
+
+        // ONE live player, wherever the navigation came from. The open path
+        // enforces this on pins; an in-current navigation writes no pin, so
+        // the rule has to hold here too or "play podcasts in this window"
+        // starts a second <audio> beside the first — deactivate() touches
+        // input, never media.
+        if (nav != null && nav.startsWith(LocalPages.PLAYER_URL)) {
+            val pins = HudPinStore.all().associateBy { it.id }
+            c?.browserWindowEntries()?.forEach { (id, w) ->
+                if (w !== target && (
+                        w.currentUrl?.startsWith(LocalPages.PLAYER_URL) == true ||
+                            pins[id]?.payload?.startsWith(LocalPages.PLAYER_URL) == true
+                        )
+                ) {
+                    HudPinStore.remove(id)
+                }
+            }
+        }
+        // Voice navigation repurposes the window, so its pin follows —
+        // click-drift deliberately does not. Without this, payload-keyed
+        // dedupe and the player sweep reason from a stale address.
+        if (nav != null) {
+            c?.pinIdFor(target)?.let { pid ->
+                HudPinStore.repointBrowser(pid, nav, WebDestination.hostLabel(nav))
+            }
+        }
+        when {
+            nav == null -> {
+                target.activateForErrand()
+                // Document-ready, not snapshot-ready: a freshly created
+                // window is mid-first-load and NOT showing a snapshot, so
+                // the old gate opened instantly and the errand ran against
+                // about:blank — every host-gated native flow missed.
+                target.whenDocumentReady { ok ->
+                    if (!stillMine()) return@whenDocumentReady
+                    when {
+                        task == null -> reportErrandHoldRelease()
+                        ok -> dispatchErrandTask(task, target)
+                        else -> reportErrandOutcome(
+                            "The page is taking too long to load, so the errand was not run.",
+                            failed = true
+                        )
+                    }
+                }
+            }
+            // Navigating to where the window already stands is a reload the
+            // wearer never asked for — it costs their scroll position and
+            // any playing media, and buys a page they are already reading.
+            task == null && !target.isShowingSnapshot &&
+                norm(target.currentUrl) == norm(nav) -> {
+                target.activateForErrand()
+                reportErrandHoldRelease()
+            }
+            // A site-ROOT navigation with an errand is a means, not the ask:
+            // "open bandcamp and play my purchases" wants the playing, and a
+            // window already inside the site can do that without the reload
+            // — which would kill the very flows (tune, play) it precedes.
+            // URLs with a path or query are the opposite: there the address
+            // carries the request, so they always navigate.
+            task != null && !target.isShowingSnapshot && isSiteRoot(nav) &&
+                WebDestination.sameHost(target.currentUrl, nav) -> {
+                target.activateForErrand()
+                target.whenDocumentReady { ok ->
+                    if (!stillMine()) return@whenDocumentReady
+                    if (ok) dispatchErrandTask(task, target)
+                    else reportErrandOutcome(
+                        "The page is taking too long to load, so the errand was not run.",
+                        failed = true
+                    )
+                }
+            }
+            else -> {
+                // wake=false: navigateThen handles the snapshot itself, and
+                // waking here would race the OLD address against the new.
+                target.activateForErrand(wake = false)
+                target.navigateThen(nav) { ok ->
+                    if (!stillMine()) return@navigateThen
+                    when {
+                        // On timeout the destination never arrived —
+                        // running the errand would aim it at whatever page
+                        // is still showing, which is how a tune request
+                        // once searched the PREVIOUS site for the station.
+                        task != null && ok -> dispatchErrandTask(task, target)
+                        ok -> reportErrandHoldRelease()
+                        else -> reportErrandOutcome(
+                            "${WebDestination.hostLabel(nav)} is taking too long to load.",
+                            failed = true
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * THE SAME ROUTER THE SPOKEN PATH USES, not a straight line to the LLM
+     * agent. The native layer owns whole flows the agent cannot do —
+     * opening a music library, tuning a station, in-page search — and
+     * skipping it left the orchestrated path dumber than the double-tap it
+     * replaced.
+     */
+    private fun dispatchErrandTask(task: String, target: BrowserWindowView) {
+        val outcome = dispatchPageCommand(task, target)
+        val agentWillReport =
+            outcome is PageCommands.Outcome.ForAgent ||
+                outcome is PageCommands.Outcome.SearchThenAgent
+        if (!agentWillReport) {
+            // A native flow completes without the agent's done-callback, so
+            // close the orchestrator's loop here — otherwise the session
+            // holds 90s for a report that is never coming.
+            val what = when (outcome) {
+                is PageCommands.Outcome.Handled -> outcome.notice
+                is PageCommands.Outcome.RunScript -> outcome.notice
+                is PageCommands.Outcome.NavigateThenScript -> outcome.notice
+                // "Searching…" not "Searched" — the search is starting, not
+                // done, and the note must not claim otherwise.
+                is PageCommands.Outcome.SearchInPage -> "Started a search on the page."
+                is PageCommands.Outcome.StopAgent -> "Stopped."
+                else -> "Done."
+            }
+            reportErrandOutcome(what)
+        }
+    }
+
+    /** Close the orchestrator's loop: release the hold, say what happened. */
+    private fun reportErrandOutcome(what: String, failed: Boolean = false) {
+        // The release is unconditional — a hold acquired while the session
+        // was live must not survive it going idle, or the stale deadline
+        // pins the wearer's NEXT session open for nothing.
+        runCatching { voiceServiceApi?.holdSessionOpen(0L) }
+        if (HudStateBridge.current().phase == HudStateBridge.VoicePhase.IDLE) return
+        val tag = if (failed) "[PAGE AGENT FAILED]" else "[PAGE AGENT FINISHED]"
+        runCatching {
+            voiceServiceApi?.sendSessionNote(
+                "$tag $what — relay this to the user in one short sentence."
+            )
+        }
+    }
+
+    /**
+     * Release the hold WITHOUT a note — for outcomes the tool reply already
+     * described ("Loading X in the current window"). A note on top made the
+     * assistant narrate the same navigation twice.
+     */
+    private fun reportErrandHoldRelease() {
+        runCatching { voiceServiceApi?.holdSessionOpen(0L) }
+    }
+
+    /** True when [url] points at a site's front page rather than a place in it. */
+    private fun isSiteRoot(url: String): Boolean = runCatching {
+        val u = android.net.Uri.parse(url)
+        (u.path.isNullOrEmpty() || u.path == "/") && u.query == null
+    }.getOrDefault(false)
 
     /**
      * Hand the assistant a picture of the window when the page has no text.
@@ -506,18 +744,35 @@ class MainActivity : AppCompatActivity() {
             "scroll_up", "up" -> { w.scrollByJs(-420); reply(WindowBridge.Reply(true, "Scrolled up.")) }
             "top" -> { w.scrollByJs(-2_000_000); reply(WindowBridge.Reply(true, "Back to the top.")) }
             "bottom", "end" -> { w.scrollByJs(2_000_000); reply(WindowBridge.Reply(true, "At the bottom.")) }
+            // Each of these can be a no-op — the ladder has ends, history
+            // has edges — and the reply is the only thing the wearer gets:
+            // "made it bigger" about a window that did not move teaches
+            // them the voice controls are broken, when actually they hit a
+            // limit nobody named.
             "bigger", "larger", "grow", "expand" -> {
-                w.resizeStep(1)
+                val grew = w.resizeStep(1)
                 hudPinBoardController?.refreshZone()
-                reply(WindowBridge.Reply(true, "Made $title bigger."))
+                reply(
+                    if (grew) WindowBridge.Reply(true, "Made $title bigger.")
+                    else WindowBridge.Reply(false, "$title is already as big as it can get here.")
+                )
             }
             "smaller", "shrink" -> {
-                w.resizeStep(-1)
+                val shrank = w.resizeStep(-1)
                 hudPinBoardController?.refreshZone()
-                reply(WindowBridge.Reply(true, "Made $title smaller."))
+                reply(
+                    if (shrank) WindowBridge.Reply(true, "Made $title smaller.")
+                    else WindowBridge.Reply(false, "$title is already at its smallest.")
+                )
             }
-            "back" -> { w.goBack(); reply(WindowBridge.Reply(true, "Went back.")) }
-            "forward" -> { w.goForward(); reply(WindowBridge.Reply(true, "Went forward.")) }
+            "back" -> reply(
+                if (w.goBack()) WindowBridge.Reply(true, "Went back.")
+                else WindowBridge.Reply(false, "There is no page to go back to.")
+            )
+            "forward" -> reply(
+                if (w.goForward()) WindowBridge.Reply(true, "Went forward.")
+                else WindowBridge.Reply(false, "There is no page to go forward to.")
+            )
             "reload", "refresh" -> { w.reload(); reply(WindowBridge.Reply(true, "Reloading $title.")) }
             else -> reply(
                 WindowBridge.Reply(
@@ -529,12 +784,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Capture the active window, save it as a bookmark, and pin it.
+     * Capture the picked window, save it as a bookmark, and pin it.
      *
-     * Same rule the page agent uses for choosing a target: the ACTIVE
-     * window, or the only one if nothing is active. Asking "which page?"
-     * when exactly one is open would be pedantic, and the wearer said
-     * "this page" precisely because they can see it.
+     * Same rule every "this page" tool uses for choosing a target —
+     * [pickedWindow]'s hand-versus-voice recency — so bookmarking cannot
+     * disagree with the page agent about which page "this page" is.
      */
     private fun bookmarkVisiblePage(reply: (BookmarkBridge.Saved) -> Unit) {
         // The same resolver every other "this page" tool uses, rather than a
@@ -599,24 +853,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         // The pin is optional: the bookmark is saved either way, and a full
-        // board is a reason to say so, not to fail the save.
-        if (thumbPath != null) {
-            val pinned = HudPinStore.add(
-                HudPinStore.HudPin(
-                    type = HudPinStore.TYPE_BOOKMARK,
-                    label = title,
-                    payload = thumbPath,
-                    sourceUrl = url
-                )
+        // board — or a failed capture, since the pin's payload IS the
+        // thumbnail — is a reason to SAY so, not to fail the save. The
+        // pinned flag rides back separately rather than being smuggled
+        // through the title, which once produced the self-contradicting
+        // "…saved, but not pinned…and pinned it to the HUD."
+        val pinned = thumbPath != null && HudPinStore.add(
+            HudPinStore.HudPin(
+                type = HudPinStore.TYPE_BOOKMARK,
+                label = title,
+                payload = thumbPath,
+                sourceUrl = url
             )
-            if (!pinned) {
-                return BookmarkBridge.Saved(
-                    true, title = "$title — saved, but the HUD board is full so it is not pinned"
-                )
-            }
-        }
-        Log.i(TAG, "bookmarked '$title' ($url) thumb=${thumbPath != null}")
-        return BookmarkBridge.Saved(true, title = title)
+        )
+        Log.i(TAG, "bookmarked '$title' ($url) thumb=${thumbPath != null} pinned=$pinned")
+        return BookmarkBridge.Saved(true, title = title, pinned = pinned)
     }
 
     private fun releasePageCommandToCursor(window: BrowserWindowView) {
@@ -961,24 +1212,31 @@ class MainActivity : AppCompatActivity() {
                         ?.debugZoomBy(f)
                     return
                 }
-                intent?.getStringExtra("task")?.let { t ->
+                if (intent?.getStringExtra("task") != null || intent?.getStringExtra("nav") != null) {
                     // Exercises the dispatch half without a microphone: the
                     // capture half needs real speech in the room, which a
-                    // scripted run cannot produce. `-e on <host>` targets a
-                    // window by URL substring, because active-or-first made
-                    // scripted runs depend on whatever the wearer happened
-                    // to leave on the board — a test suite dispatched "go to
-                    // my purchases" at a leftover search window and scored
-                    // its own miss as the app's.
+                    // scripted run cannot produce. Routed through the SAME
+                    // bridge the voice tools use — a private copy of the
+                    // resolution here once let scripted runs pass while the
+                    // spoken path failed, which is a test door testing the
+                    // door. `-e on <host>` is the windowHint; `-e nav <url>`
+                    // is a navigation, with `-e task` riding as the errand
+                    // to run once it lands.
+                    val t = intent.getStringExtra("task")
+                    // Through the same allowlist every voice navigation
+                    // clears — a debug door that loads schemes the app
+                    // refuses is testing a different app.
+                    val nav = intent.getStringExtra("nav")
+                        ?.let { WebDestination.resolveUrl(it) }
                     val on = intent.getStringExtra("on")?.lowercase()
-                    val windows = hudPinBoardController?.browserWindows().orEmpty()
-                    val w = on?.let { h ->
-                        windows.firstOrNull { it.currentUrl.orEmpty().contains(h, true) }
-                    }
-                        ?: windows.firstOrNull { it.isActive }
-                        ?: windows.firstOrNull()
-                    Log.i(TAG, "DEBUG task window=${w?.currentUrl?.take(40)}: $t")
-                    if (w == null) showNotice("No window open.") else dispatchPageCommand(t, w)
+                    Log.i(TAG, "DEBUG task nav=${nav?.take(40)} on=$on: $t")
+                    AgentTaskBridge.request(
+                        AgentTaskBridge.PageErrand(
+                            navigateTo = nav,
+                            task = t?.takeIf { it.isNotBlank() },
+                            windowHint = on
+                        )
+                    )
                     return
                 }
                 if (intent?.getStringExtra("adblock") != null) {
@@ -1178,11 +1436,23 @@ class MainActivity : AppCompatActivity() {
                 }
                 val url = intent?.getStringExtra("url")
                 val query = intent?.getStringExtra("query")
-                Log.i(TAG, "DEBUG_OPEN_BROWSER url=$url query=$query")
+                // site, window and errand are how the MODEL usually calls
+                // this tool — "a station on radio garden, in this window"
+                // arrives as site+query+window, and "open X and do Y" rides
+                // its second half in errand. Without them here the door
+                // could only test the shape the model rarely sends.
+                val site = intent?.getStringExtra("site")
+                val window = intent?.getStringExtra("window")
+                val errand = intent?.getStringExtra("errand")
+                Log.i(TAG, "DEBUG_OPEN_BROWSER url=$url query=$query site=$site " +
+                    "window=$window errand=$errand")
                 lifecycleScope.launch {
                     val args = buildMap {
                         if (!url.isNullOrBlank()) put("url", url)
                         if (!query.isNullOrBlank()) put("query", query)
+                        if (!site.isNullOrBlank()) put("site", site)
+                        if (!window.isNullOrBlank()) put("window", window)
+                        if (!errand.isNullOrBlank()) put("errand", errand)
                     }
                     val result = BrowserTool(applicationContext).execute(args)
                     Log.i(TAG, "DEBUG_OPEN_BROWSER -> ${result.getOrElse { "failed: ${it.message}" }}")
@@ -1252,6 +1522,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // First, before anything is torn down: stop taking errands. The
+        // bridge is a process singleton; left installed it would keep
+        // accepting requests on behalf of an activity whose board is
+        // null — request() reports "taken", the errand dies in a
+        // no-window notice, and the singleton pins this instance in
+        // memory until the next activity replaces the listener.
+        AgentTaskBridge.setListener(null)
         // WebViews hold a lot and do not go quietly: destroy them explicitly
         // rather than trusting the activity teardown to collect them.
         hudPinBoardController?.browserWindows()?.forEach { it.destroy() }
@@ -1767,85 +2044,8 @@ class MainActivity : AppCompatActivity() {
             uiHandler.post { bookmarkVisiblePage(reply) }
         }
 
-        AgentTaskBridge.setListener { task, windowHint ->
-            uiHandler.post {
-                // The SAME resolution every other "this page" caller uses.
-                // This listener kept a private older copy of the rule
-                // (active-else-only) and it failed live: a voice-opened
-                // window is INERT by design, so with two windows on the
-                // board the dispatch told a wearer looking at the open page
-                // to open a page. pickedWindow knows the window most
-                // recently asked for through the store, which is exactly
-                // the one an orchestrated task that arrives 300ms after
-                // open_browser is about.
-                val c = hudPinBoardController
-                // A caller that NAMED the window wins over every heuristic:
-                // "a station on radio garden" is about the radio.garden
-                // window however inert it is and whatever was opened since.
-                // Matched with non-alphanumerics stripped, because speech
-                // says "radio garden" and the URL spells "radio.garden".
-                fun squash(s: String?) = (s ?: "").lowercase().replace(Regex("[^a-z0-9]"), "")
-                val hinted = windowHint?.takeIf { it.isNotBlank() }?.let { h ->
-                    val hs = squash(h)
-                    c?.browserWindows()?.firstOrNull {
-                        hs.isNotEmpty() && squash(it.currentUrl).contains(hs)
-                    }
-                }
-                val target = hinted ?: pickedWindow()
-                if (target == null) {
-                    showNotice("Open a page first, then give the agent a task.")
-                } else {
-                    if (!target.isActive) {
-                        c?.browserWindows()?.forEach { if (it !== target) it.deactivate() }
-                        target.activate()
-                    }
-                    // A task dispatched mid-session is an errand the session
-                    // is waiting on: the tool reply comes back instantly, the
-                    // turn completes, and the 5s between-turn clock would
-                    // close the conversation under a 30-second errand. The
-                    // hold is a deadline, not a flag — a wedged agent costs
-                    // at most its own timeout, and completion releases it.
-                    if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) {
-                        runCatching { voiceServiceApi?.holdSessionOpen(90_000L) }
-                    }
-                    // THE SAME ROUTER THE SPOKEN PATH USES, not a straight
-                    // line to the LLM agent. The native layer owns whole
-                    // flows the agent cannot do — opening a music library,
-                    // tuning a station, in-page search — and skipping it left
-                    // the orchestrated path dumber than the double-tap it
-                    // replaced: "play my purchases" became a search for the
-                    // word purchases while the machinery for it sat unused.
-                    target.ensureLoaded {
-                        val outcome = dispatchPageCommand(task, target)
-                        val agentWillReport =
-                            outcome is PageCommands.Outcome.ForAgent ||
-                                outcome is PageCommands.Outcome.SearchThenAgent
-                        if (!agentWillReport &&
-                            HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE
-                        ) {
-                            // A native flow completes without the agent's
-                            // done-callback, so close the orchestrator's loop
-                            // here — otherwise the session holds 90s for a
-                            // report that is never coming.
-                            runCatching { voiceServiceApi?.holdSessionOpen(0L) }
-                            val what = when (outcome) {
-                                is PageCommands.Outcome.Handled -> outcome.notice
-                                is PageCommands.Outcome.RunScript -> outcome.notice
-                                is PageCommands.Outcome.NavigateThenScript -> outcome.notice
-                                is PageCommands.Outcome.SearchInPage -> "Searching the page."
-                                is PageCommands.Outcome.StopAgent -> "Stopped."
-                                else -> "Done."
-                            }
-                            runCatching {
-                                voiceServiceApi?.sendSessionNote(
-                                    "[PAGE AGENT FINISHED] $what — relay this to " +
-                                        "the user in one short sentence."
-                                )
-                            }
-                        }
-                    }
-                }
-            }
+        AgentTaskBridge.setListener { errand ->
+            uiHandler.post { handlePageErrand(errand) }
         }
         hudPinBoardController?.onBrowserWindowReleased = { w ->
             // The agent controller holds the window and a watchdog Runnable;

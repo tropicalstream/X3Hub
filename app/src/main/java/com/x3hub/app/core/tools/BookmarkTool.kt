@@ -39,8 +39,15 @@ class BookmarkTool(private val context: Context) : AiTapTool {
         }
         val title = saved.title?.takeIf { it.isNotBlank() } ?: "the page"
         // Spoken verbatim: one sentence, and it names what was saved so the
-        // wearer can tell WHICH window was taken when several are open.
-        return "Saved $title to your bookmarks and pinned it to the HUD."
+        // wearer can tell WHICH window was taken when several are open. The
+        // pin is claimed only when one exists — a wearer told about a pin
+        // that is not there goes looking for it on the board.
+        return if (saved.pinned) {
+            "Saved $title to your bookmarks and pinned it to the HUD."
+        } else {
+            "Saved $title to your bookmarks. It is not on the HUD board — " +
+                "the board may be full, or the picture could not be taken."
+        }
     }
 
     /**

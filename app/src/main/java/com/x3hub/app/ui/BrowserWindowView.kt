@@ -247,7 +247,11 @@ class BrowserWindowView @JvmOverloads constructor(
     // page-agent has no navigate tool and its prompt tells it to stay put,
     // so browsing has to be the app's job.
 
-    fun goForward() { if (webView.canGoForward()) webView.goForward() }
+    fun goForward(): Boolean {
+        if (!webView.canGoForward()) return false
+        webView.goForward()
+        return true
+    }
     fun reload() { webView.reload() }
 
     /**
@@ -972,33 +976,101 @@ class BrowserWindowView @JvmOverloads constructor(
     }
 
     /**
-     * Run [block] once, after the next page finish whose URL is a DIFFERENT
-     * document than [notUrl] — surviving duplicate finishes of the same one.
-     *
-     * "Next finish" is the wrong contract when two loads of one URL are in
-     * flight, and that happens every time a voice errand re-opens a page
-     * that is already up: open_browser reloads it, the dispatcher loads it
-     * again, and the chained follow-up armed for "the page my script
-     * navigates to" was consumed by the duplicate instead — measured live,
-     * the press-play step fired on the bandcamp HOMEPAGE while the album it
-     * was meant for loaded with nothing armed, and the wearer got a
-     * shuffled album sitting silent at 0:00. [maxFinishes] bounds the wait
-     * so an armed block cannot outlive its errand.
+     * Counts navigation starts, so a caller can tell "a finish belonging to
+     * a load I issued" from the queued finish of whatever was already in
+     * flight when it asked. Monotonic, main-thread only.
      */
-    fun runAfterPageChangeFrom(notUrl: String, maxFinishes: Int = 6, block: (String?) -> Unit) {
-        fun norm(u: String?) = (u ?: "").substringBefore('#').trimEnd('/')
-        val skip = norm(notUrl)
-        var remaining = maxFinishes
+    private var navSeq = 0
+
+    /**
+     * Navigate to [url] and run [onLanded] exactly once, when the load has
+     * settled — for "go there, THEN act on what arrives".
+     *
+     * This exists because both prior gates were wrong for the job:
+     * "the next finish" can belong to a load that was already in flight,
+     * and "a finish whose URL changed" never fires at all when the window
+     * is already at the destination — loadUrl has no same-URL guard, the
+     * page reloads, and the finish arrives with the same address while the
+     * armed errand waits forever for a different one. Measured live: told
+     * to play something "in this window" while standing on the right page,
+     * the app reloaded the page, delivered nothing, and had already said
+     * it was done.
+     *
+     * The settle test is a sequence number bumped on every page START: a
+     * finish counts only once a NEW navigation began after this call, which
+     * is precisely the load issued here (or its redirect). [timeoutMs]
+     * bounds the wait — a dead network cannot strand an errand the wearer
+     * has already been promised; [onLanded] gets false so the caller can
+     * say so instead of acting on the wrong page.
+     *
+     * The snapshot case is folded in rather than layered on: a window
+     * restored from a still holds no document, and waking it would load
+     * the OLD address first — two loads racing to be "the" finish. Pointing
+     * the deferred wake at [url] itself means one load, one finish, ours.
+     */
+    fun navigateThen(url: String, timeoutMs: Long = 15_000L, onLanded: (ok: Boolean) -> Unit) {
+        var settled = false
+        fun settle(ok: Boolean) {
+            if (settled) return
+            settled = true
+            onLanded(ok)
+        }
+        if (isShowingSnapshot) {
+            deferredUrl = url
+            wakeFromSnapshot { ok -> settle(ok) }
+            return
+        }
+        val seqAtCall = navSeq
         fun arm() {
-            pageFinishedOnce.add { url ->
+            pageFinishedOnce.add {
                 when {
-                    norm(url) != skip -> block(url)
-                    --remaining > 0 -> arm()
-                    else -> Unit
+                    settled -> Unit
+                    navSeq > seqAtCall -> settle(true)
+                    // A queued finish from a load that predates ours —
+                    // wait for the real one.
+                    else -> arm()
                 }
             }
         }
         arm()
+        postDelayed({ settle(false) }, timeoutMs)
+        loadUrl(url)
+    }
+
+    /**
+     * Run [onReady] when this window holds a REAL, finished document — now
+     * if it already does, after the in-flight load otherwise, and on the
+     * bounded timeout when nothing ever arrives (ok=false).
+     *
+     * This is the gate an errand on "the page" actually needs, and neither
+     * older gate was it: ensureLoaded answers "is a snapshot in the way",
+     * which is instantly true for a freshly created window still loading
+     * its first document — measured, a one-call "open bandcamp and play my
+     * purchases" dispatched the errand while webView.url was still null, so
+     * every host-gated native flow missed and the LLM agent woke up on
+     * about:blank. And waiting for "the URL to change" never fires when the
+     * document is already the right one mid-load.
+     *
+     * Callers wake the snapshot (activate) or issue the navigation first;
+     * this function only ever WAITS — it starts no load of its own, so it
+     * cannot race the one it is waiting for.
+     */
+    fun whenDocumentReady(timeoutMs: Long = 20_000L, onReady: (ok: Boolean) -> Unit) {
+        val url = webView.url
+        if (!isShowingSnapshot && !url.isNullOrBlank() && url != "about:blank" &&
+            webView.progress >= 100
+        ) {
+            onReady(true)
+            return
+        }
+        var settled = false
+        fun settle(ok: Boolean) {
+            if (settled) return
+            settled = true
+            onReady(ok)
+        }
+        pageFinishedOnce.add { settle(true) }
+        postDelayed({ settle(false) }, timeoutMs)
     }
 
     /**
@@ -1255,6 +1327,7 @@ class BrowserWindowView @JvmOverloads constructor(
                 favicon: android.graphics.Bitmap?
             ) {
                 super.onPageStarted(view, url, favicon)
+                navSeq++
                 injectPolyfills()
                 injectSiteChromeFilters()
                 injectInputHooks()
@@ -1506,6 +1579,31 @@ class BrowserWindowView @JvmOverloads constructor(
         foreground = borderActive
     }
 
+    /**
+     * Activate on behalf of a voice errand: everything [activate] does
+     * EXCEPT claiming wearer focus.
+     *
+     * The dispatcher used to call activate() for the window it picked, and
+     * that bump made its own guess look like the wearer's choice — every
+     * errand after the first landed on whatever window the PREVIOUS errand
+     * had used, because the picker trusted lastFocusMs and the dispatcher
+     * had been writing it. Focus times now change only under a wearer's
+     * actual hand (click, modify), so recency means what it says.
+     *
+     * [wake] is false when the caller is about to navigate the window
+     * itself: waking a snapshot loads the OLD address, and two loads racing
+     * to be "the" finish is exactly what the caller's own gate exists to
+     * avoid.
+     */
+    fun activateForErrand(wake: Boolean = true) {
+        autoplayWithSound = true
+        if (wake) wakeFromSnapshot()
+        if (isActive && !isModifying) return
+        isModifying = false
+        isActive = true
+        foreground = borderActive
+    }
+
     /** Back to INERT: the page stops receiving anything. Idempotent. */
     fun deactivate() {
         if (!isActive && !isModifying) return
@@ -1600,13 +1698,14 @@ class BrowserWindowView @JvmOverloads constructor(
      * from under the layout, and every size the wearer can reach is one the
      * page scale was checked at.
      */
-    fun resizeStep(direction: Int) {
-        if (direction == 0) return
+    fun resizeStep(direction: Int): Boolean {
+        if (direction == 0) return false
         val requested = (sizeStep + if (direction > 0) 1 else -1)
             .coerceIn(0, SIZE_LADDER.lastIndex)
         val next = largestStepThatFits(requested)
-        if (next == sizeStep) return
+        if (next == sizeStep) return false
         commitSize(next)
+        return true
     }
 
     /**

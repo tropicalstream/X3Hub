@@ -848,6 +848,30 @@ object PageCommands {
         return template + URLEncoder.encode(query.trim(), "UTF-8")
     }
 
+    /**
+     * The FRONT PAGE of a site the wearer named, or null if unknown —
+     * scheme and host cut from the same search templates, so the two can
+     * never disagree about where a site lives. "Open bandcamp" with the
+     * name in the site argument used to fall through every branch and land
+     * on the search home page: the table knew the site, but only how to
+     * search it.
+     */
+    fun siteRootUrl(site: String): String? {
+        val name = site.trim().trim('"', '\'').trim()
+        val template = SITE_SEARCHES.firstOrNull { it.first.matches(name) }?.second
+            ?: return null
+        // The app's own pages ARE their path — x3hub.local has no front
+        // page, so cutting /podplayer.html off would open nothing. Remote
+        // sites are the opposite: their search path with no query ("
+        // /results?search_query=") is an empty results page, and the front
+        // page is what "open youtube" means.
+        val noQuery = template.substringBefore('?')
+        if (noQuery.startsWith("https://x3hub.local")) return noQuery
+        val schemeEnd = template.indexOf("://") + 3
+        val hostEnd = template.indexOf('/', schemeEnd).takeIf { it > 0 } ?: template.length
+        return template.substring(0, hostEnd)
+    }
+
     fun searchUrl(query: String, google: Boolean): String {
         val q = URLEncoder.encode(query.trim(), "UTF-8")
         return if (google) "https://www.google.com/search?q=$q" else "https://duckduckgo.com/?q=$q"
