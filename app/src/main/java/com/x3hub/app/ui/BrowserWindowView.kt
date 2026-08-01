@@ -1531,6 +1531,28 @@ class BrowserWindowView @JvmOverloads constructor(
     /** True while the host is holding this window quiet for the microphone. */
     private var mediaHeldForMic = false
 
+    /** The Activity lifecycle and the microphone can independently pause us. */
+    private var hostPaused = false
+    private var webViewProcessingPaused = false
+
+    /**
+     * Apply the union of the two pause reasons without letting one resume the
+     * WebView while the other still owns it.
+     *
+     * WebView.onPause() is intentionally stronger than pausing DOM media: it
+     * also suspends Web Audio, which soundboards and radio sites commonly use.
+     * It does not pause JavaScript (pauseTimers would, process-wide), so page
+     * state and agent work remain intact while the microphone is protected.
+     */
+    private fun syncWebViewProcessingState() {
+        val shouldPause = hostPaused || mediaHeldForMic
+        if (shouldPause == webViewProcessingPaused) return
+        webViewProcessingPaused = shouldPause
+        if (shouldPause) webView.onPause() else webView.onResume()
+        Log.i(TAG, "WebView processing ${if (shouldPause) "paused" else "resumed"} " +
+            "hostPaused=$hostPaused mediaHeld=$mediaHeldForMic url=${currentUrl?.take(80)}")
+    }
+
     /**
      * Hold page media while the microphone is open — see [MEDIA_SUSPEND_JS].
      * Safe to call on a window that is playing nothing.
@@ -1544,14 +1566,24 @@ class BrowserWindowView @JvmOverloads constructor(
      * its voice when the mic closes.
      */
     fun setMediaSuspended(suspended: Boolean) {
+        if (mediaHeldForMic == suspended) {
+            syncWebViewProcessingState()
+            return
+        }
         mediaHeldForMic = suspended
+
+        // Pause/resume the renderer first. The old DOM-only guard missed
+        // AudioContext output entirely (observed with 101soundboards.com),
+        // which then fed back through the glasses mic as false user speech.
+        syncWebViewProcessingState()
         runCatching {
             webView.evaluateJavascript(
                 if (suspended) MEDIA_SUSPEND_JS else MEDIA_RESUME_JS,
                 null
             )
         }
-        // Catch up on release: the page skipped its unmute while held.
+        // Catch up on release: the page skipped its unmute while held. This
+        // remains after onResume so HTML players see a live renderer.
         if (!suspended) injectMediaAutoplay()
     }
 
@@ -1892,14 +1924,17 @@ class BrowserWindowView @JvmOverloads constructor(
 
     /** Forward the host activity's onPause. */
     fun onHostPause() {
-        // onPause only, never pauseTimers: that one is process-global and
-        // would freeze every other browser window on the board.
-        webView.onPause()
+        hostPaused = true
+        // Never pauseTimers: that one is process-global and would freeze
+        // every other browser window on the board.
+        syncWebViewProcessingState()
     }
 
     /** Forward the host activity's onResume. */
     fun onHostResume() {
-        webView.onResume()
+        hostPaused = false
+        // A microphone hold still wins over the Activity returning.
+        syncWebViewProcessingState()
     }
 
     /**
