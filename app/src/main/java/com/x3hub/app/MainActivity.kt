@@ -396,6 +396,25 @@ class MainActivity : AppCompatActivity() {
     private var errandSeq = 0
 
     /**
+     * An errand is in flight — from acceptance to its terminal, whichever
+     * machinery executes it. The ⚙ glyph used to mirror only the LLM page
+     * agent's busy flag, and most errands never touch that agent: a tune,
+     * a collection play, an in-window navigation are all NATIVE flows. The
+     * wearer cannot tell the machineries apart — Gemini says "the agent is
+     * on it" either way — so in dim, where the glyph is the only sign of
+     * life, native errands looked like nothing was happening at all.
+     */
+    private var errandBusy = false
+
+    private fun setErrandBusy(busy: Boolean) {
+        if (errandBusy == busy) return
+        errandBusy = busy
+        Log.i(TAG, "errandBusy=$busy")
+        renderActivityGlyphs()
+        dimController?.refreshReadout()
+    }
+
+    /**
      * One page errand, one window, and the truth about what happened.
      *
      * Ordering of window resolution: pin IDENTITY from the caller beats a
@@ -453,6 +472,10 @@ class MainActivity : AppCompatActivity() {
         fun stillMine(): Boolean =
             myTurn == errandSeq &&
                 hudPinBoardController?.browserWindows()?.any { it === target } == true
+        // The errand is accepted: the glyph goes on HERE, not when (if) the
+        // LLM agent picks it up — native flows are errands too, and the
+        // wearer was watching a blank dim readout while a station tuned.
+        setErrandBusy(true)
         c?.browserWindows()?.forEach { if (it !== target) it.deactivate() }
         // A task dispatched mid-session is an errand the session is waiting
         // on: the tool reply comes back instantly, the turn completes, and
@@ -591,6 +614,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Close the orchestrator's loop: release the hold, say what happened. */
     private fun reportErrandOutcome(what: String, failed: Boolean = false) {
+        setErrandBusy(false)
         // The release is unconditional — a hold acquired while the session
         // was live must not survive it going idle, or the stale deadline
         // pins the wearer's NEXT session open for nothing.
@@ -610,6 +634,7 @@ class MainActivity : AppCompatActivity() {
      * assistant narrate the same navigation twice.
      */
     private fun reportErrandHoldRelease() {
+        setErrandBusy(false)
         runCatching { voiceServiceApi?.holdSessionOpen(0L) }
     }
 
@@ -1086,7 +1111,9 @@ class MainActivity : AppCompatActivity() {
                     // Live session = the wearer is mid-conversation with the
                     // orchestrator; the result goes INTO that conversation so
                     // one voice narrates and the next step can follow. The
-                    // hold is released either way — the errand is over.
+                    // hold is released either way — the errand is over, and
+                    // so is the errand glyph.
+                    setErrandBusy(false)
                     val live = HudStateBridge.current().phase !=
                         HudStateBridge.VoicePhase.IDLE
                     runCatching { voiceServiceApi?.holdSessionOpen(0L) }
@@ -1434,7 +1461,7 @@ class MainActivity : AppCompatActivity() {
                         "DEBUG dimstatus dimmed=${dimController?.isDimmed} " +
                             "glyphs='${activityGlyphs()}' mediaMuted=${isSystemMediaMuted()} " +
                             "phase=${HudStateBridge.current().phase} " +
-                            "agentBusy=${AgentActivityBridge.busy}"
+                            "agentBusy=${AgentActivityBridge.busy} errandBusy=$errandBusy"
                     )
                     return
                 }
@@ -1778,7 +1805,10 @@ class MainActivity : AppCompatActivity() {
      */
     private fun activityGlyphs(): String = DimActivityStatus.glyphs(
         geminiActive = HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE,
-        pageAgentBusy = AgentActivityBridge.busy,
+        // Either machinery: the LLM page agent OR a native errand in
+        // flight. The wearer cannot tell them apart and should not have
+        // to — "the agent is on it" earns the same gear either way.
+        pageAgentBusy = AgentActivityBridge.busy || errandBusy,
         mediaMuted = isSystemMediaMuted()
     )
 

@@ -1021,13 +1021,26 @@ class BrowserWindowView @JvmOverloads constructor(
             return
         }
         val seqAtCall = navSeq
+        fun norm(u: String?) = (u ?: "").substringBefore('#').trimEnd('/')
+        val preNav = norm(currentUrl)
+        val wanted = norm(url)
         fun arm() {
-            pageFinishedOnce.add {
+            pageFinishedOnce.add { finishedUrl ->
+                val f = norm(finishedUrl)
                 when {
                     settled -> Unit
-                    navSeq > seqAtCall -> settle(true)
-                    // A queued finish from a load that predates ours —
-                    // wait for the real one.
+                    // Ours: a navigation began after this call AND the
+                    // finished document is not the page we were LEAVING.
+                    // The sequence check alone was not enough — measured, a
+                    // load our loadUrl cancelled still delivered its
+                    // onPageFinished (with the OLD address) after our start,
+                    // and the errand dispatched against the page the wearer
+                    // had just asked to leave. The one legitimate old-URL
+                    // finish is a reload, where wanted == preNav anyway.
+                    navSeq > seqAtCall && (f == wanted || f != preNav) ->
+                        settle(true)
+                    // A queued finish from a load that predates ours, or
+                    // the leaving page's dying gasp — wait for the real one.
                     else -> arm()
                 }
             }
