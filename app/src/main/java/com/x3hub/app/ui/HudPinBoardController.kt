@@ -98,10 +98,21 @@ class HudPinBoardController(
         stopTicker()
     }
 
-    /** Re-slot the grid after HUD geometry changes (camera preview on/off). */
+    /**
+     * Re-slot the grid after HUD geometry changes — a window stepping its
+     * size ladder, the camera preview appearing or leaving.
+     *
+     * FORCED, because the pin list has not changed and that is exactly the
+     * point: this asks for a re-LAYOUT, not a re-read. Without the flag it
+     * re-entered render with the very list already in the field, the
+     * text-only fast path compared every pin to itself, found nothing
+     * changed, and returned before placing anything — so a resized window
+     * grew over its neighbours and the camera preview never pushed the
+     * pins out from under it. Every caller of this function was a no-op.
+     */
     fun refreshZone() {
         if (pinViews.isEmpty() && pinsSnapshot.isEmpty()) return
-        render(pinsSnapshot)
+        render(pinsSnapshot, force = true)
     }
 
     // ------------------------------------------------------------------
@@ -161,7 +172,7 @@ class HudPinBoardController(
         }
     }
 
-    private fun render(pins: List<HudPin>) {
+    private fun render(pins: List<HudPin>, force: Boolean = false) {
         // A live card refreshing its text used to rebuild the ENTIRE board:
         // every view destroyed and recreated, browser WebViews included. With
         // two live cards on a five-minute cadence that is a full teardown
@@ -169,7 +180,14 @@ class HudPinBoardController(
         // every pin measures 0x0 — which is how a window came to be
         // photographed as nothing at all. Text-only updates now redraw just
         // the cards whose text moved.
-        if (onlyContentChanged(pins)) {
+        // MODIFY is excluded from the fast path: it rebuilds a card's
+        // children, which silently takes the ✕ chip with them while the
+        // mode stays armed — the wearer then taps where the ✕ was, the
+        // delete branch finds no chip, and the tap falls through to MOVE.
+        // A delete gesture became a move, and the card was persisted as
+        // hand-placed. The full render below exits the mode and re-enters
+        // it on the new views, which is the path built for exactly this.
+        if (!force && modifyPinId == null && onlyContentChanged(pins)) {
             val previous = pinsSnapshot
             pinsSnapshot = pins
             var needsFullRender = false
@@ -217,9 +235,32 @@ class HudPinBoardController(
         // display out mid-edit. So the mode is re-entered on the new views.
         val resumeModifyPinId = modifyPinId
         exitModifyMode()
-        board.removeAllViews()
+        // RETAINED RENDER. Everything else here is rebuilt from scratch,
+        // which is fine for text and pictures and ruinous for a WebView: a
+        // detach tears the page's video layer off the surface it is
+        // rendering into, and Chromium does not always resubscribe on the
+        // way back — measured on the glasses, a moved window kept playing
+        // its soundtrack with the picture frozen, decode counter stuck,
+        // while the element still reported itself playing. So a browser
+        // window that survives this render is never detached at all: its
+        // container stays on the board and only its layout params move.
+        val survivingBrowsers = HashMap<String, FrameLayout>()
+        pinViews.forEach { (id, container) ->
+            val pin = pins.firstOrNull { it.id == id } ?: return@forEach
+            if (pin.type == BrowserTool.TYPE_BROWSER &&
+                browserWindows.containsKey(id) &&
+                container.parent === board
+            ) {
+                survivingBrowsers[id] = container
+            }
+        }
+        for (i in board.childCount - 1 downTo 0) {
+            val child = board.getChildAt(i)
+            if (survivingBrowsers.values.none { it === child }) board.removeViewAt(i)
+        }
         movePreview = null
         pinViews.clear()
+        pinViews.putAll(survivingBrowsers)
         // Windows whose pin is gone die HERE, not lazily: each one is a live
         // WebView (renderer process, JS heap) plus a page-agent controller in
         // the host, and nothing else ever walks this cache again. Before this
@@ -340,13 +381,23 @@ class HudPinBoardController(
                 rowH = maxOf(rowH, h)
             }
             container.layoutParams = lp
-            board.addView(container)
+            val alreadyOnBoard = container.parent === board
+            if (!alreadyOnBoard) board.addView(container)
             pinViews[pin.id] = container
-            // removeAllViews above detached this window; a re-attached
-            // video layer can stall its frames while the audio plays on.
-            if (pin.type == BrowserTool.TYPE_BROWSER) {
+            // Only a window that genuinely arrived (first build, or one
+            // restored after the board was emptied) can have a stalled
+            // video layer. A retained one never left its surface.
+            if (!alreadyOnBoard && pin.type == BrowserTool.TYPE_BROWSER) {
                 browserWindows[pin.id]?.nudgeVideoAfterReattach()
             }
+        }
+        // Z-ORDER, reasserted without detaching anything. Retained windows
+        // keep the child indices they had, so newly added pins would draw
+        // over them purely by arrival order. bringChildToFront REORDERS a
+        // child — it does not detach it — so replaying the placement order
+        // restores exactly the stacking a full rebuild used to produce.
+        for (pin in ordered) {
+            pinViews[pin.id]?.let { board.bringChildToFront(it) }
         }
         if (resumeModifyPinId != null && pinViews.containsKey(resumeModifyPinId)) {
             enterModifyMode(resumeModifyPinId)
@@ -561,6 +612,27 @@ class HudPinBoardController(
 
     /** Container FrameLayout: content + (hidden until modify) ✕ chip. */
     private fun buildPinView(pin: HudPin): FrameLayout {
+        // A browser window still on the board is REUSED whole — see the
+        // retained-render note in render(). Only the box it declares can
+        // have changed (the wearer may have stepped its size ladder); the
+        // caller sets the margins, as it does for a fresh container.
+        if (pin.type == BrowserTool.TYPE_BROWSER) {
+            val kept = pinViews[pin.id]?.takeIf { it.parent === board }
+            val window = browserWindows[pin.id]
+            if (kept != null && window != null) {
+                (kept.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                    lp.width = window.windowWidth
+                    lp.height = window.windowHeight
+                    kept.layoutParams = lp
+                }
+                // Re-bound to THIS render's pin object: the old lambda
+                // captured the pin as it was, and openPin reads its fields.
+                kept.setOnClickListener {
+                    if (modifyPinId != null) exitModifyMode() else openPin(pin)
+                }
+                return kept
+            }
+        }
         val container = FrameLayout(activity)
         val content: View = when (pin.type) {
             HudPinStore.TYPE_PICTURE -> buildPictureContent(pin)
