@@ -532,16 +532,19 @@ class HudPinBoardController(
 
     /** The pin id backing a window, so a caller can close it via the store. */
     /** The pin under a screen point, if any. */
-    fun pinAt(screenX: Float, screenY: Float): String? {
-        val loc = IntArray(2)
-        pinViews.forEach { (id, v) ->
-            v.getLocationOnScreen(loc)
-            if (screenX >= loc[0] && screenX < loc[0] + v.width &&
-                screenY >= loc[1] && screenY < loc[1] + v.height
-            ) return id
-        }
-        return null
-    }
+    fun pinAt(screenX: Float, screenY: Float): String? =
+        topPinAt(screenX, screenY)?.key
+
+    /**
+     * The topmost pin at a point, in DRAW order. Every hit-test the taps
+     * go through resolves this way, or a stack misbehaves: the first-in-map
+     * rule sent a triple-tap on the FRONT card into MODIFY on the buried
+     * one — the wearer watched the wrong window sprout a delete chip.
+     */
+    private fun topPinAt(screenX: Float, screenY: Float): Map.Entry<String, FrameLayout>? =
+        pinViews.entries
+            .filter { (_, v) -> viewContains(v, screenX, screenY) }
+            .maxByOrNull { (_, v) -> board.indexOfChild(v) }
 
     fun pinIdFor(window: BrowserWindowView): String? =
         browserWindows.entries.firstOrNull { it.value === window }?.key
@@ -990,9 +993,8 @@ class HudPinBoardController(
      * caller's branch — it checks [isInModifyMode] first.
      */
     fun onDoubleTapAt(screenX: Float, screenY: Float): Boolean {
-        val hit = pinViews.entries.firstOrNull { (_, v) ->
-            viewContains(v, screenX, screenY)
-        } ?: return false
+        // Topmost, always: the wearer is pointing at the card they can SEE.
+        val hit = topPinAt(screenX, screenY) ?: return false
         enterModifyMode(hit.key)
         return true
     }
