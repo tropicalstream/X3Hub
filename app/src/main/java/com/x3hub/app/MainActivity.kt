@@ -919,15 +919,30 @@ class MainActivity : AppCompatActivity() {
         return BookmarkBridge.Saved(true, title = title, pinned = pinned)
     }
 
+    /**
+     * A page command finished: bring the cursor back — and KEEP the window
+     * selected.
+     *
+     * This used to deactivate, from an era when an active window claimed
+     * the pad's slides and a finished command had to hand them back or the
+     * pointer read as dead. The cursor is never taken away now — slides
+     * always move it, scrolling belongs to the edge bands — so the release
+     * had one remaining effect: stripping the cyan border off the window
+     * the wearer had JUST used. That contradicts the selection contract
+     * everything else follows ("a window stays picked until the wearer
+     * picks another"), and it split behavior by machinery: an LLM-agent
+     * task left the highlight, a task that happened to route natively took
+     * it away — same double-tap, different aftermath, for a reason no
+     * wearer could see.
+     */
     private fun releasePageCommandToCursor(window: BrowserWindowView) {
         if (keyboardOwner === window && keyboardView?.visibility == View.VISIBLE) {
             hideOnScreenKeyboard()
             return
         }
-        window.deactivate()
         stopEdgeScroll()
         setCursorVisible(true)
-        Log.i(TAG, "Page command complete — browser released and cursor owns touchpad")
+        Log.i(TAG, "Page command complete — cursor back, window stays selected")
     }
 
     /** Drive the page's own search box; fall back to the web if it has none. */
