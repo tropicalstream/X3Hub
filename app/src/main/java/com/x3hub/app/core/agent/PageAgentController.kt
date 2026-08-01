@@ -69,6 +69,10 @@ class PageAgentController(
         set(value) {
             field = value
             AgentActivityBridge.set(value != null)
+            // The renderer must run while the agent drives this window —
+            // a paused one freezes layout under the agent's clicks. Same
+            // dispatch-to-terminal lifetime as the glyph, same anchor.
+            window.agentDriving = value != null
         }
     private var hops = 0
     private var resumePending = false

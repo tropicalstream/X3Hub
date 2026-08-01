@@ -1366,6 +1366,11 @@ class BrowserWindowView @JvmOverloads constructor(
             ) {
                 super.onPageStarted(view, url, favicon)
                 navSeq++
+                // A navigation needs a live renderer whatever the mic is
+                // doing — see documentReadyForPause. Re-sync so a window
+                // paused under the hold wakes for the load it was asked for.
+                documentReadyForPause = false
+                syncWebViewProcessingState()
                 injectPolyfills()
                 injectSiteChromeFilters()
                 injectInputHooks()
@@ -1445,6 +1450,10 @@ class BrowserWindowView @JvmOverloads constructor(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                // The document is here: a pending mic-hold pause may land
+                // now — after the one-shot waiters below have been served,
+                // so an errand gated on this finish dispatches first.
+                documentReadyForPause = true
                 // Twice on purpose: at start so a script running during
                 // parse finds the shims, and at finish for anything the
                 // document replaced in between.
@@ -1473,6 +1482,9 @@ class BrowserWindowView @JvmOverloads constructor(
                     pageFinishedOnce.clear()
                     due.forEach { runCatching { it(url) } }
                 }
+                // Last, so every waiter above ran on a live renderer: if
+                // the mic hold was waiting for this document, pause now.
+                syncWebViewProcessingState()
             }
         }
     }
@@ -1571,6 +1583,39 @@ class BrowserWindowView @JvmOverloads constructor(
 
     /** The Activity lifecycle and the microphone can independently pause us. */
     private var hostPaused = false
+
+    /**
+     * Whether this window currently holds a FINISHED document — the only
+     * kind the mic-hold renderer pause may apply to. The pause exists to
+     * stop page audio leaking into an open microphone, and a page that has
+     * not loaded has no audio to leak — but a paused renderer also cannot
+     * LOAD, so pausing a newborn window deadlocked the whole orchestrated
+     * flow, traced live: Gemini opened YouTube mid-conversation, the mic
+     * hold froze the blank window at url=null, the page never finished,
+     * the errand's session hold kept the mic open waiting for it, and the
+     * wearer stared at black until the 90-second hold expired. False from
+     * every page START to its FINISH, so a navigation the wearer or the
+     * agent asks for mid-session loads live and the pause lands the moment
+     * the document is there. The DOM media suspend and born-quiet autoplay
+     * gating cover the load window in between.
+     */
+    private var documentReadyForPause = false
+
+    /**
+     * The page agent is actively working THIS window. A paused renderer
+     * freezes layout, and the agent clicks by element position — measured
+     * under the mic-hold pause, its "first video" click landed on a stale
+     * suggestion chip and searched instead of playing. While the agent
+     * drives, the renderer stays live; the DOM media suspend still holds
+     * the page's sound out of the open microphone, which is the leak the
+     * pause exists to stop.
+     */
+    var agentDriving: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            syncWebViewProcessingState()
+        }
     private var webViewProcessingPaused = false
 
     /**
@@ -1583,12 +1628,15 @@ class BrowserWindowView @JvmOverloads constructor(
      * state and agent work remain intact while the microphone is protected.
      */
     private fun syncWebViewProcessingState() {
-        val shouldPause = hostPaused || mediaHeldForMic
+        val shouldPause = hostPaused ||
+            (mediaHeldForMic && documentReadyForPause && !agentDriving)
         if (shouldPause == webViewProcessingPaused) return
         webViewProcessingPaused = shouldPause
         if (shouldPause) webView.onPause() else webView.onResume()
         Log.i(TAG, "WebView processing ${if (shouldPause) "paused" else "resumed"} " +
-            "hostPaused=$hostPaused mediaHeld=$mediaHeldForMic url=${currentUrl?.take(80)}")
+            "hostPaused=$hostPaused mediaHeld=$mediaHeldForMic " +
+            "docReady=$documentReadyForPause agent=$agentDriving " +
+            "url=${currentUrl?.take(80)}")
     }
 
     /**
