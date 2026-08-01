@@ -796,10 +796,10 @@ class GeminiVoicePipeline(context: Context) {
      * turn, [ConversationIdlePolicy] grants a bounded response wait until new
      * model text/audio/tool output arrives.
      *
-     * "Activity" = user speech on the mic (level gate in the read loop), any
-     * transcription event, model audio playing, or a tool call in flight.
-     * Opening grace remains longer so activating Gemini does not require the
-     * wearer to have the whole first question pre-composed.
+     * Confirmed user interaction = an input transcription, debug voice turn,
+     * or accepted barge-in. Raw mic-level blips remain tentative and cannot
+     * extend a never-used session. Model playback and tools are allowed to
+     * finish, but do not restart the five-second opening clock.
      */
     private fun startSilenceWatchdog(epoch: Long) {
         silenceWatchdogJob?.cancel()
@@ -1170,10 +1170,11 @@ class GeminiVoicePipeline(context: Context) {
         private const val STREAM_RESUME_PREFIX_FRAMES = 4
 
         /**
-         * Grace before the FIRST utterance. Long enough to activate the
-         * assistant, look at what you meant to ask about, and speak.
+         * No separate long opening grace: activating Gemini and then giving
+         * it no confirmed interaction follows the same five-second contract
+         * in dim and normal mode.
          */
-        private const val SILENCE_OPENING_MS = 20_000L
+        private const val SILENCE_OPENING_MS = SILENCE_END_MS
         private const val SILENCE_WATCHDOG_TICK_MS = 250L
 
         /** How long after a turn completes to drop duplicate late output

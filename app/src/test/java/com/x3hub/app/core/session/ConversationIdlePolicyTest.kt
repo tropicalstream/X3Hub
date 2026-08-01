@@ -8,12 +8,88 @@ import org.junit.Test
 class ConversationIdlePolicyTest {
 
     @Test
-    fun openingGraceAllowsTimeToFormFirstQuestion() {
+    fun unusedSessionEndsFiveSecondsAfterOpening() {
         val policy = policy()
         policy.reset(1_000)
 
-        assertFalse(policy.snapshot(20_999).shouldEnd)
-        assertTrue(policy.snapshot(21_000).shouldEnd)
+        assertFalse(policy.snapshot(5_999).shouldEnd)
+        assertTrue(policy.snapshot(6_000).shouldEnd)
+    }
+
+    @Test
+    fun backgroundActivityCannotExtendUnusedSession() {
+        val policy = policy()
+        policy.reset(0)
+        policy.onConversationActivity(4_900)
+
+        assertTrue(policy.snapshot(5_000).shouldEnd)
+    }
+
+    @Test
+    fun soundInProgressDefersTheOpeningDeadline() {
+        // Sound one second ago is a wearer MID-SENTENCE, not an idle
+        // session: transcription takes seconds to confirm speech, and
+        // closing at the deadline under live sound hung up on every first
+        // question — measured on the glasses. The deadline defers while
+        // sound arrives; the noise cap below is what keeps that bounded.
+        val policy = policy()
+        policy.reset(0)
+        policy.onTentativeUserActivity(4_000)
+
+        val snapshot = policy.snapshot(5_000)
+        assertEquals(5_000, snapshot.timeoutMs)
+        assertFalse(snapshot.shouldEnd)
+    }
+
+    @Test
+    fun tentativeMicrophoneNoiseCannotExtendUnusedSessionPastTheCap() {
+        // Codex's original point, kept: sound that never becomes language
+        // cannot hold an unused microphone open forever. It buys at most
+        // NOISE_CAP_MULTIPLIER deadlines, then dies mid-noise.
+        val policy = policy()
+        policy.reset(0)
+        var t = 1_000L
+        while (t < 20_000L) {
+            policy.onTentativeUserActivity(t)
+            t += 500L
+        }
+        val snapshot = policy.snapshot(20_000)
+        assertTrue(snapshot.shouldEnd)
+    }
+
+    @Test
+    fun liveSoundNeverFlushesThePendingAudio() {
+        // The flush means "the audio went quiet"; judging it by the
+        // interaction clock flushed the stream every watchdog tick while
+        // the wearer spoke — their question reached Gemini in fragments.
+        val policy = policy()
+        policy.reset(0)
+        policy.onTentativeUserActivity(3_000)
+
+        assertFalse(policy.snapshot(3_200).shouldFlushPendingAudio(1_000))
+        assertTrue(policy.snapshot(4_500).shouldFlushPendingAudio(1_000))
+    }
+
+    @Test
+    fun fizzledMicrophoneNoiseCannotRestartOpeningClock() {
+        val policy = policy()
+        policy.reset(0)
+        policy.onTentativeUserActivity(2_000)
+        policy.onTentativeFizzled(3_200)
+
+        assertTrue(policy.snapshot(5_000).shouldEnd)
+    }
+
+    @Test
+    fun realInteractionNearOpeningDeadlineGetsResponseGrace() {
+        val policy = policy()
+        policy.reset(0)
+        policy.onUserActivity(4_900)
+
+        val snapshot = policy.snapshot(5_000)
+        assertTrue(snapshot.awaitingModelResponse)
+        assertEquals(20_000, snapshot.timeoutMs)
+        assertFalse(snapshot.shouldEnd)
     }
 
     @Test
@@ -170,18 +246,16 @@ class ConversationIdlePolicyTest {
     }
 
     @Test
-    fun blipOnAFreshSessionPreservesTheOpeningGrace() {
+    fun blipOnAFreshSessionDoesNotOutliveOpeningDeadline() {
         val policy = policy()
         policy.reset(0)
 
         policy.onTentativeUserActivity(1_000)
         policy.onTentativeFizzled(2_200)
 
-        // heardUser must be restored, or a door slam would cut the wearer's
-        // 20s to form their first question down to the 5s idle clock.
-        val snapshot = policy.snapshot(9_000)
-        assertEquals(20_000, snapshot.timeoutMs)
-        assertFalse(snapshot.shouldEnd)
+        val snapshot = policy.snapshot(5_000)
+        assertEquals(5_000, snapshot.timeoutMs)
+        assertTrue(snapshot.shouldEnd)
     }
 
     @Test
@@ -271,7 +345,7 @@ class ConversationIdlePolicyTest {
     }
 
     private fun policy() = ConversationIdlePolicy(
-        openingTimeoutMs = 20_000,
+        openingTimeoutMs = 5_000,
         idleTimeoutMs = 5_000,
         responseTimeoutMs = 20_000
     )

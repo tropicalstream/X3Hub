@@ -21,18 +21,50 @@ internal class ConversationIdlePolicy(
         val heardUser: Boolean,
         val awaitingModelResponse: Boolean,
         /** The pending turn has run out of rope regardless of recent noise. */
-        val pendingTurnExpired: Boolean = false
+        val pendingTurnExpired: Boolean = false,
+        /**
+         * How long since the microphone last heard ANYTHING over the speech
+         * gate — tentative or confirmed. This is a different question from
+         * [idleForMs], and conflating them broke the app in both directions
+         * at once. idleForMs answers "has the wearer INTERACTED", and only
+         * confirmed evidence may refresh it, or noise keeps a dead session
+         * open forever. This answers "is sound arriving RIGHT NOW", and it
+         * is the only clock allowed to gate what happens to live audio:
+         * measured on the glasses, judging the audio by the interaction
+         * clock flushed the stream every watchdog tick while the wearer was
+         * mid-sentence — their question reached Gemini diced into
+         * quarter-second fragments, each flush's resume re-sent a stale
+         * prefix the server heard as barge-in, and the replies died to
+         * phantom interruptions.
+         */
+        val soundQuietForMs: Long = Long.MAX_VALUE / 2
     ) {
         val shouldEnd: Boolean
-            get() = pendingTurnExpired || idleForMs >= timeoutMs
+            get() = pendingTurnExpired ||
+                // Idle past the deadline closes the session — but never
+                // UNDER live sound: a wearer mid-question is not idle,
+                // whatever the confirmation clock says, and speech takes
+                // seconds to come back as a transcription. Sound defers
+                // the close only up to the noise cap, so a room that never
+                // goes quiet still cannot hold an uninteracted session
+                // open past a bounded multiple of its deadline.
+                (idleForMs >= timeoutMs &&
+                    (soundQuietForMs >= SOUND_CLOSE_GRACE_MS ||
+                        idleForMs >= timeoutMs * NOISE_CAP_MULTIPLIER))
 
+        /**
+         * Flush = "the audio went quiet"; only actual quiet may say so.
+         */
         fun shouldFlushPendingAudio(afterMs: Long): Boolean =
             awaitingModelResponse &&
-                idleForMs >= afterMs.coerceAtLeast(0L)
+                soundQuietForMs >= afterMs.coerceAtLeast(0L)
     }
 
     private var lastActivityMs: Long = 0L
+    private var openedAtMs: Long = 0L
+    private var lastSoundMs: Long = 0L
     private var heardUser = false
+    private var confirmedUserActivity = false
     private var awaitingModelResponse = false
     private var tentativeSpeech = false
     private var priorHeardUser = false
@@ -55,7 +87,10 @@ internal class ConversationIdlePolicy(
     @Synchronized
     fun reset(nowMs: Long) {
         lastActivityMs = nowMs
+        openedAtMs = nowMs
+        lastSoundMs = nowMs
         heardUser = false
+        confirmedUserActivity = false
         awaitingModelResponse = false
         tentativeSpeech = false
         awaitingSinceMs = 0L
@@ -66,7 +101,9 @@ internal class ConversationIdlePolicy(
     @Synchronized
     fun onUserActivity(nowMs: Long) {
         lastActivityMs = maxOf(lastActivityMs, nowMs)
+        lastSoundMs = maxOf(lastSoundMs, nowMs)
         heardUser = true
+        confirmedUserActivity = true
         markAwaiting(nowMs)
         // Real evidence — whatever tentative state preceded it is confirmed
         // and a later fizzle must not roll this back.
@@ -112,7 +149,10 @@ internal class ConversationIdlePolicy(
      */
     @Synchronized
     fun onTentativeUserActivity(nowMs: Long) {
-        lastActivityMs = maxOf(lastActivityMs, nowMs)
+        // The SOUND clock, never the interaction clock: this is what keeps
+        // live audio from being flushed mid-word without letting a blip
+        // masquerade as the wearer having spoken.
+        lastSoundMs = maxOf(lastSoundMs, nowMs)
         if (!tentativeSpeech) {
             tentativeSpeech = true
             priorHeardUser = heardUser
@@ -127,12 +167,12 @@ internal class ConversationIdlePolicy(
      * again and no transcription or model output confirmed it. Restore the
      * pre-blip state. A turn that was ALREADY pending stays pending; a blip
      * on a quiet session goes back to the short idle clock. The activity
-     * bump is kept, because sound did arrive and the session must not close
-     * in the same instant it might still be transcribing.
+     * clock is deliberately not touched: an unconfirmed level crossing is
+     * room noise, not voice interaction, and repeated noise must not keep an
+     * unused microphone open beyond its five-second deadline.
      */
     @Synchronized
     fun onTentativeFizzled(nowMs: Long) {
-        lastActivityMs = maxOf(lastActivityMs, nowMs)
         if (!tentativeSpeech) return
         tentativeSpeech = false
         heardUser = priorHeardUser
@@ -170,10 +210,21 @@ internal class ConversationIdlePolicy(
 
     @Synchronized
     fun snapshot(nowMs: Long): Snapshot {
+        // Connection callbacks, UI work, and raw level-gate blips are not user
+        // interaction. Before a transcription/debug turn confirms the wearer,
+        // the opening deadline is absolute from session-ready. Otherwise a
+        // quiet room with occasional noise can keep a never-used microphone
+        // open forever by continually refreshing lastActivityMs.
+        val waitingForFirstInteraction = !confirmedUserActivity
         val timeout = when {
-            !heardUser -> openingTimeoutMs
+            waitingForFirstInteraction -> openingTimeoutMs
             awaitingModelResponse -> responseTimeoutMs
             else -> idleTimeoutMs
+        }
+        val idleFor = if (waitingForFirstInteraction) {
+            nowMs - openedAtMs
+        } else {
+            nowMs - lastActivityMs
         }
         // Two hard stops on a pending turn, because the ordinary idle clock
         // cannot see through noise: it is refreshed by the very ambient sound
@@ -196,15 +247,16 @@ internal class ConversationIdlePolicy(
                 nowMs - awaitingSinceMs >= responseTimeoutMs * MAX_PENDING_WINDOWS
             )
         return Snapshot(
-            idleForMs = (nowMs - lastActivityMs).coerceAtLeast(0L),
+            idleForMs = idleFor.coerceAtLeast(0L),
             timeoutMs = timeout,
             heardUser = heardUser,
             awaitingModelResponse = awaitingModelResponse,
-            pendingTurnExpired = expired
+            pendingTurnExpired = expired,
+            soundQuietForMs = (nowMs - lastSoundMs).coerceAtLeast(0L)
         )
     }
 
-    private companion object {
+    internal companion object {
         /**
          * How many response windows a single pending turn may span before it
          * is declared runaway. Generous on purpose: this is a backstop for
@@ -212,5 +264,22 @@ internal class ConversationIdlePolicy(
          * ends a normal turn.
          */
         const val MAX_PENDING_WINDOWS = 3
+
+        /**
+         * The mic must have been quiet this long for an expired idle clock
+         * to actually close the session. Long enough to bridge the gaps
+         * inside a sentence; far shorter than any deadline it defers.
+         */
+        const val SOUND_CLOSE_GRACE_MS = 2_000L
+
+        /**
+         * Sound alone can stretch a deadline at most this many times over.
+         * A never-quiet room closes at 4× instead of never — for the 5s
+         * opening clock that is 20s, exactly the opening grace the app
+         * shipped with before any of this. Real speech confirms itself via
+         * transcription long before any cap; only sound that never becomes
+         * language ever meets one.
+         */
+        const val NOISE_CAP_MULTIPLIER = 4
     }
 }
