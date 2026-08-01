@@ -274,6 +274,7 @@ class HudPinBoardController(
                 lp.leftMargin = pin.customX
                 lp.topMargin = pin.customY
                 clampToZone(lp, w, h, zone)
+                cascadeIfEclipsed(lp, w, h, customRects, zone)
                 customRects += intArrayOf(
                     lp.leftMargin, lp.topMargin, lp.leftMargin + w, lp.topMargin + h
                 )
@@ -329,6 +330,7 @@ class HudPinBoardController(
                         lp.leftMargin = keepX
                         lp.topMargin = keepY
                     }
+                    cascadeIfEclipsed(lp, w, h, customRects, zone)
                     x = lp.leftMargin
                     y = lp.topMargin
                     rowH = 0
@@ -343,6 +345,11 @@ class HudPinBoardController(
         }
         if (resumeModifyPinId != null && pinViews.containsKey(resumeModifyPinId)) {
             enterModifyMode(resumeModifyPinId)
+        }
+        // Re-assert the raised window: the rebuild above re-added children
+        // in pin order, silently undoing any raise.
+        lastRaisedPinId?.let { id ->
+            pinViews[id]?.let { board.bringChildToFront(it) }
         }
         syncTicker()
     }
@@ -439,9 +446,47 @@ class HudPinBoardController(
     /** Called as a window's pin is deleted, before the WebView is destroyed. */
     var onBrowserWindowReleased: ((BrowserWindowView) -> Unit)? = null
 
-    /** The window under a screen point, if any — for click/gesture routing. */
+    /**
+     * The window under a screen point, if any — for click/gesture routing.
+     *
+     * TOPMOST in draw order, not first in map order: when cards stack, the
+     * wearer is pointing at the one they can SEE, and map order is just
+     * creation order. In the overlap region the front card wins; on the
+     * peeking strip only the back card contains the point, so a tap there
+     * reaches it — and the click's activation then raises it.
+     */
     fun browserWindowAt(screenX: Float, screenY: Float): BrowserWindowView? =
-        browserWindows.values.firstOrNull { it.containsScreenPoint(screenX, screenY) }
+        browserWindows.values
+            .filter { it.containsScreenPoint(screenX, screenY) }
+            .maxByOrNull { boardChildIndexOf(it) }
+
+    /** The board child that carries [v] (the view itself, or its wrapper). */
+    private fun boardChildIndexOf(v: View): Int {
+        var cur: View = v
+        while (cur.parent !== board) {
+            cur = (cur.parent as? View) ?: return -1
+        }
+        return board.indexOfChild(cur)
+    }
+
+    /**
+     * Bring a window to the front of the stack, and KEEP it there: the
+     * board rebuilds on every store change, which resets child order to
+     * pin order, and a raise that silently undid itself on the next
+     * bookmark or live-card refresh would read as flaky. The raised pin
+     * is remembered and re-applied after every render.
+     */
+    fun raiseToFront(window: BrowserWindowView) {
+        lastRaisedPinId = pinIdFor(window)
+        var cur: View = window
+        while (cur.parent !== board) {
+            cur = (cur.parent as? View) ?: return
+        }
+        board.bringChildToFront(cur)
+        board.invalidate()
+    }
+
+    private var lastRaisedPinId: String? = null
 
     /** Every live window, for lifecycle forwarding and "deactivate the others". */
     fun browserWindows(): Collection<BrowserWindowView> = browserWindows.values
@@ -1053,6 +1098,43 @@ class HudPinBoardController(
     // ── Magnetic tiling ──────────────────────────────────────────────
 
     /** Total px this rect would cover of any hand-placed pin. */
+    /**
+     * Stacked is FINE, buried is not: a card drawn almost exactly over
+     * another leaves the one behind invisible with no clue it exists. When
+     * the placed card eclipses (or is eclipsed by) an already-placed one —
+     * intersection at least [ECLIPSE_PERCENT] of the smaller card — it is
+     * nudged down-right from that card's corner by [CASCADE_PX], the
+     * classic window-manager cascade, so an L-strip of the card behind
+     * stays visible and clickable. One step, not a search: the peek strip
+     * is the goal, and a deterministic nudge keeps every render agreeing
+     * with the last one. The clamp can eat the nudge at the zone's far
+     * corner; a buried card there is the least-bad honest outcome.
+     */
+    private fun cascadeIfEclipsed(
+        lp: FrameLayout.LayoutParams,
+        w: Int,
+        h: Int,
+        rects: List<IntArray>,
+        zone: Zone
+    ) {
+        for (r in rects) {
+            val il = maxOf(lp.leftMargin, r[0])
+            val it2 = maxOf(lp.topMargin, r[1])
+            val ir = minOf(lp.leftMargin + w, r[2])
+            val ib = minOf(lp.topMargin + h, r[3])
+            if (ir <= il || ib <= it2) continue
+            val inter = (ir - il).toLong() * (ib - it2)
+            val areaA = w.toLong() * h
+            val areaB = (r[2] - r[0]).toLong() * (r[3] - r[1])
+            if (inter * 100 >= ECLIPSE_PERCENT * minOf(areaA, areaB)) {
+                lp.leftMargin = r[0] + CASCADE_PX
+                lp.topMargin = r[1] + CASCADE_PX
+                clampToZone(lp, w, h, zone)
+                return
+            }
+        }
+    }
+
     private fun overlapArea(l: Int, t: Int, w: Int, h: Int, rects: List<IntArray>): Long {
         var sum = 0L
         for (r in rects) {
@@ -1533,6 +1615,16 @@ class HudPinBoardController(
          * to spare: 3*170 + 2*12 = 534.
          */
         private const val GAP_DP = 12
+
+        /**
+         * Cascade step for a card that would bury another — big enough
+         * that the strip left showing is a comfortable tap target on this
+         * cursor, small enough that the stack still reads as one pile.
+         */
+        private const val CASCADE_PX = 26
+
+        /** Intersection over the SMALLER card that counts as buried. */
+        private const val ECLIPSE_PERCENT = 80L
 
         /**
          * How far apart two same-size pins' facing edges may be and still

@@ -476,6 +476,10 @@ class MainActivity : AppCompatActivity() {
         // LLM agent picks it up — native flows are errands too, and the
         // wearer was watching a blank dim readout while a station tuned.
         setErrandBusy(true)
+        // The window the voice is driving comes forward, same as a click
+        // would bring it: "play something on that page" followed by a page
+        // the wearer cannot see is an answer hidden behind furniture.
+        c?.raiseToFront(target)
         c?.browserWindows()?.forEach { if (it !== target) it.deactivate() }
         // A task dispatched mid-session is an errand the session is waiting
         // on: the tool reply comes back instantly, the turn completes, and
@@ -3350,6 +3354,10 @@ class MainActivity : AppCompatActivity() {
                     if (it !== window) it.deactivate()
                 }
                 window.activate()
+                // Choosing a card IS asking to see it: a stacked card that
+                // activated but stayed buried gave the wearer a cyan border
+                // peeking out from behind the page they could actually read.
+                hudPinBoardController?.raiseToFront(window)
                 Log.d(TAG, "browser window activated at (${pt.first}, ${pt.second})")
                 return
             }
