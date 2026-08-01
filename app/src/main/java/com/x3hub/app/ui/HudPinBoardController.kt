@@ -16,6 +16,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.x3hub.app.R
+import com.x3hub.app.core.bridge.DefaultPins
 import com.x3hub.app.core.bridge.HudPinStore
 import com.x3hub.app.core.bridge.HudPinStore.HudPin
 import com.x3hub.app.core.live.LiveCardEngine
@@ -86,7 +87,12 @@ class HudPinBoardController(
 
     fun start() {
         HudPinStore.init(activity)
+        // Before the observer, so a fresh install's first render already
+        // has them and the wearer never sees the empty board flash.
+        DefaultPins.seedIfFirstRun(activity)
         subscription?.runCatching { close() }
+        // observe() replays the current board to a new listener, so the
+        // seed above is already in the first render it delivers.
         subscription = HudPinStore.observe { pins ->
             uiHandler.post { render(pins) }
         }
