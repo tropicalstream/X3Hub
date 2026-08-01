@@ -3095,6 +3095,87 @@ class BrowserWindowView @JvmOverloads constructor(
                 (document.head || document.documentElement).appendChild(style);
               }
 
+              // ── YouTube's watch page hides its own title ──────────────
+              //
+              // Reported as "I can't scroll to the top of the video info".
+              // It was not a scroll problem at all: measured on the glasses,
+              // the title element sat at y192 while the player — position:
+              // FIXED — occupied 48…228, so the player was painted ON TOP of
+              // it, and no amount of scrolling moves a fixed element. A
+              // hit-test at the title's centre returned the player's
+              // progress bar.
+              //
+              // Two causes, both only on the page the PAGE AGENT produces:
+              // a fresh load of the same URL renders correctly, an SPA
+              // click-through from search results does not.
+              //
+              //  1. The metadata block is pulled UP under the player — a
+              //     layout meant for a transparent top bar, not for a video
+              //     parked there. Pushed back down by exactly the measured
+              //     overlap, so it works at every window size on the ladder
+              //     rather than at one hard-coded offset.
+              //  2. A sticky filter-chip bar ("All / <artist> / <genre>")
+              //     covers whatever the push reveals. It is a browse control
+              //     for a phone-sized screen; on a 170px window it is a
+              //     third of the metadata area spent on chips nobody can
+              //     read. Hidden on /watch only — the same bar filters the
+              //     home feed, where it earns its space.
+              //
+              // Only at scrollTop 0, where the geometry is the layout's own
+              // truth: mid-scroll, "how far is the content above the
+              // player's bottom edge" is a scroll distance, not an overlap,
+              // and pushing by it would send the page into orbit.
+              if (/(^|\.)youtube\.com$/.test(location.hostname) &&
+                  !window.__x3WatchLayoutFix && window.ResizeObserver) {
+                window.__x3WatchLayoutFix = true;
+                var fixWatch = function(){
+                  if (location.pathname.indexOf('/watch') !== 0) return;
+                  var doc = document.scrollingElement;
+                  if (!doc || doc.scrollTop > 0) return;
+                  var p = document.querySelector('#player-container-id');
+                  if (!p || getComputedStyle(p).position !== 'fixed') return;
+                  var wrap = document.querySelector('.related-chips-slot-wrapper');
+                  if (!wrap) {
+                    var below = document.querySelector('.watch-below-the-player');
+                    wrap = below && below.firstElementChild;
+                  }
+                  if (!wrap) return;
+                  // Document-wide, not inside the wrapper: measured, the
+                  // bar is a SIBLING of the block it visually sits in, so a
+                  // scoped query finds nothing and the chips stay parked
+                  // over the title the push just uncovered.
+                  var chips = document.querySelector('ytm-chip-cloud-renderer');
+                  if (chips && chips.style.display !== 'none') chips.style.display = 'none';
+                  // Measured AFTER the chips go, so the push accounts for
+                  // the layout the wearer will actually see.
+                  var gap = Math.round(
+                    p.getBoundingClientRect().bottom - wrap.getBoundingClientRect().top
+                  );
+                  if (Math.abs(gap) < 2) return;
+                  var now = parseFloat(getComputedStyle(wrap).marginTop) || 0;
+                  // Signed, so a player that SHRANK gives its space back.
+                  // Self-correcting: once applied the gap reads zero and
+                  // this becomes a no-op until something moves again.
+                  wrap.style.marginTop = Math.max(0, Math.round(now + gap)) + 'px';
+                };
+                var ro = new ResizeObserver(fixWatch);
+                // Re-attached rather than bound once: the player element is
+                // REPLACED across SPA navigations, so an observer holding
+                // today's node goes quiet on the next video.
+                var attach = function(){
+                  var p = document.querySelector('#player-container-id');
+                  if (p) { try { ro.observe(p); } catch(e){} }
+                  fixWatch();
+                };
+                attach();
+                document.addEventListener('yt-navigate-finish', attach, true);
+                window.addEventListener('resize', fixWatch, true);
+                // Backstop for navigations that announce themselves by
+                // neither event — two seconds is well inside the time it
+                // takes a wearer to look down and read a title.
+                setInterval(attach, 2000);
+              }
+
               if (window.__x3PromoSweep) return;
               window.__x3PromoSweep = true;
 
