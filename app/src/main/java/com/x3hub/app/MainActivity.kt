@@ -53,6 +53,7 @@ import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.CustomKeyboardView
 import com.x3hub.app.ui.DimController
 import com.x3hub.app.ui.DimActivityStatus
+import com.x3hub.app.ui.DimTapSequence
 import com.x3hub.app.ui.DimPullGesture
 import com.x3hub.app.BuildConfig
 import com.x3hub.app.core.agent.AgentSpeech
@@ -128,6 +129,7 @@ class MainActivity : AppCompatActivity() {
      * a later pull up could inherit.
      */
     private val dimExitGesture = DimPullGesture()
+    private val dimTapSequence = DimTapSequence()
     private val hideCursorRunnable = Runnable { setCursorVisible(false) }
 
     // ── Right-arm tap state ──────────────────────────────────────────
@@ -1364,6 +1366,9 @@ class MainActivity : AppCompatActivity() {
                 // not bypassed by it.
                 intent?.getStringExtra("taps")?.let { spec ->
                     val n = spec.trim().toIntOrNull()?.coerceIn(1, 3) ?: 1
+                    val tapGapMs = intent.getStringExtra("tapgap")
+                        ?.trim()?.toLongOrNull()?.coerceIn(40L, 1_000L)
+                        ?: SYNTH_TAP_GAP_MS
                     // `-e drift <px>` walks the cursor between taps, which is
                     // what a real temple pad does: the finger that presses
                     // also slides. A scripted burst at one fixed coordinate
@@ -1371,7 +1376,8 @@ class MainActivity : AppCompatActivity() {
                     // triple-tap judged at the drifted position instead of
                     // where the wearer aimed.
                     val drift = intent.getStringExtra("drift")?.trim()?.toFloatOrNull() ?: 0f
-                    Log.i(TAG, "DEBUG synth $n tap(s) at ${cursorInteractionPoint()} drift=$drift")
+                    Log.i(TAG, "DEBUG synth $n tap(s) at ${cursorInteractionPoint()} " +
+                        "gap=${tapGapMs}ms drift=$drift")
                     repeat(n) { i ->
                         uiHandler.postDelayed({
                             if (i > 0 && drift != 0f) {
@@ -1381,7 +1387,7 @@ class MainActivity : AppCompatActivity() {
                                 Log.i(TAG, "DEBUG drift -> ($cursorX, $cursorY)")
                             }
                             onRightArmTapUp(TapSource.KEY)
-                        }, i * SYNTH_TAP_GAP_MS)
+                        }, i * tapGapMs)
                     }
                     return
                 }
@@ -2148,6 +2154,10 @@ class MainActivity : AppCompatActivity() {
             root,
             statusGlyphs = { activityGlyphs() }
         ) { dimmed ->
+            // A tap sequence belongs wholly to the mode in which it began.
+            // Never let a pending dim single/double land on the visible HUD,
+            // or a pending normal click fire behind the blackout.
+            cancelPendingSingleTapClick()
             // The tool layer reads this: while dimmed, every open_browser
             // drives the one invisible window instead of minting siblings
             // the wearer cannot see.
@@ -2866,6 +2876,7 @@ class MainActivity : AppCompatActivity() {
         pendingSingleTapClick?.let { uiHandler.removeCallbacks(it) }
         pendingSingleTapClick = null
         rightArmTapStreak = 0
+        dimTapSequence.reset()
         rightArmKeyLastTapUpMs = 0L
     }
 
@@ -2904,6 +2915,15 @@ class MainActivity : AppCompatActivity() {
         }
         lastRightArmTapUpAcceptedMs = now
         lastRightArmTapSource = source
+
+        // Dim has three global meanings and no visible target: single wakes
+        // Gemini, double toggles system media mute, triple wakes the display.
+        // Resolve it in one dedicated classifier so no prefix of a valid
+        // triple can leak into either of the first two actions.
+        if (dimController?.isDimmed == true) {
+            handleDimTap(now)
+            return
+        }
 
         // The 2→3 gap gets a longer tolerance than the 1→2 gap. They are not
         // the same act: the second tap follows the first at whatever rhythm
@@ -2969,6 +2989,40 @@ class MainActivity : AppCompatActivity() {
         uiHandler.postDelayed(resolve, window + 20L)
     }
 
+    /** Resolve a dim-mode tap sequence atomically. */
+    private fun handleDimTap(nowMs: Long) {
+        pendingSingleTapClick?.let { uiHandler.removeCallbacks(it) }
+        pendingSingleTapClick = null
+
+        val update = dimTapSequence.onTap(nowMs)
+        Log.i(
+            TAG,
+            "Dim tap ${update.tapCount}${if (update.isTripleTap) " — triple" else " — waiting"}"
+        )
+        if (update.isTripleTap) {
+            rightArmTapStreak = 0
+            rightArmKeyLastTapUpMs = 0L
+            onRightArmTripleTap()
+            return
+        }
+
+        val tapCount = update.tapCount
+        val resolve = Runnable {
+            pendingSingleTapClick = null
+            dimTapSequence.reset()
+            // Exiting dim by another route cancels this sequence in the
+            // controller callback. This guard is the final stale-action fuse.
+            if (dimController?.isDimmed != true) return@Runnable
+            if (tapCount == 2) {
+                onRightArmDoubleTap(update.resolveAfterMs)
+            } else {
+                performClickAtCursor()
+            }
+        }
+        pendingSingleTapClick = resolve
+        uiHandler.postDelayed(resolve, update.resolveAfterMs + 20L)
+    }
+
     /**
      * True only where a single tap is irreversible enough to be worth waiting
      * on: inside a page that already has the input, where a click can navigate
@@ -2976,10 +3030,6 @@ class MainActivity : AppCompatActivity() {
      * Everything else is cheap to undo, so it fires at once.
      */
     private fun tapNeedsDeferral(point: Pair<Float, Float>): Boolean {
-        // Dim has exactly two meanings — one tap wakes Gemini, three wake
-        // the display — so a single must wait out the streak window, or
-        // every triple to undim would also open a microphone behind it.
-        if (dimController?.isDimmed == true) return true
         if (hubSettingsOverlay?.isShowing == true) return false
         // MODIFY mode is the one place where ALL THREE counts mean something
         // different — one commits the move, two or three leave — so a tap
