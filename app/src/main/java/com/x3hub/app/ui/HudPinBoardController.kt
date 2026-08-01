@@ -342,6 +342,11 @@ class HudPinBoardController(
             container.layoutParams = lp
             board.addView(container)
             pinViews[pin.id] = container
+            // removeAllViews above detached this window; a re-attached
+            // video layer can stall its frames while the audio plays on.
+            if (pin.type == BrowserTool.TYPE_BROWSER) {
+                browserWindows[pin.id]?.nudgeVideoAfterReattach()
+            }
         }
         if (resumeModifyPinId != null && pinViews.containsKey(resumeModifyPinId)) {
             enterModifyMode(resumeModifyPinId)

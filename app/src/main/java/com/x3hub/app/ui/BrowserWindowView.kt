@@ -947,6 +947,31 @@ class BrowserWindowView @JvmOverloads constructor(
     // call back into, which is why these are instance methods rather than
     // the activity-level singletons SmartView could get away with.
 
+    /**
+     * Re-push the current video frame after this view is detached and
+     * re-attached — which the board does on EVERY full render, and a full
+     * render is what a window move triggers.
+     *
+     * Measured on the glasses: after a move, a playing video's element
+     * still reported paused=false with currentTime advancing in real time
+     * — the page was playing and the audio proved it — while the picture
+     * stood still. Chromium's hardware video layer does not always
+     * resubscribe to the fresh surface on re-attach. Seeking the video to
+     * the time it is already at forces the pipeline to render the current
+     * frame into the new surface; applied live to a frozen window, the
+     * picture resumed immediately. Idempotent, a no-op on windows with no
+     * playing video, and delayed past the re-attach layout so the surface
+     * it renders into is the one that will stay.
+     */
+    fun nudgeVideoAfterReattach() {
+        postDelayed({
+            evaluateJavascript(
+                "(function(){var v=document.querySelector('video');" +
+                    "if(v&&!v.paused){v.currentTime=v.currentTime;}})()"
+            )
+        }, VIDEO_REATTACH_NUDGE_MS)
+    }
+
     fun evaluateJavascript(script: String, callback: ((String?) -> Unit)? = null) {
         webView.evaluateJavascript(script) { r -> callback?.invoke(r) }
     }
@@ -1992,6 +2017,9 @@ class BrowserWindowView @JvmOverloads constructor(
 
         /** How long a tool waits for a woken page before using what it has. */
         private const val WAKE_TIMEOUT_MS = 8_000L
+
+        /** Past the re-attach layout pass, well before a wearer notices. */
+        private const val VIDEO_REATTACH_NUDGE_MS = 300L
 
         /**
          * Return the URL represented by a bookmark still.
