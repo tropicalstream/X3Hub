@@ -16,3 +16,6 @@ captures/
 
 # Trailer capture artefacts — the cut is the deliverable, the takes are not
 seg/
+
+# Kotlin daemon session files
+.kotlin/
