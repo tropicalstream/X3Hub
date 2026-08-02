@@ -2896,12 +2896,14 @@ class BrowserWindowView @JvmOverloads constructor(
 
         /**
          * The width served to sites that cripple their narrow layout (see
-         * [layoutWidthFor]). 940 is Discord's own desktop minimum window
-         * width, so the full three-pane app is guaranteed rather than
-         * hoped for at some in-between width whose behavior nobody
-         * documents.
+         * [layoutWidthFor]). Started at 940 — Discord's own desktop
+         * minimum — but page scale is windowWidth/THIS, so every CSS px
+         * here is paid for in font size on a 323px-wide window. 720 keeps
+         * the desktop bundle (the mobile-shell cutoff sits far below, at
+         * roughly 485) and buys the text back a third; verified on the
+         * glasses that the server rail and channel list both survive.
          */
-        private const val DESKTOP_LAYOUT_CSS_WIDTH = 940
+        private const val DESKTOP_LAYOUT_CSS_WIDTH = 720
 
         private const val MODERN_UA =
             "Mozilla/5.0 (Linux; Android 12; RayNeo X3 Pro) AppleWebKit/537.36 " +
