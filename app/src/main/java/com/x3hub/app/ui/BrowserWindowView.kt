@@ -3301,6 +3301,83 @@ class BrowserWindowView @JvmOverloads constructor(
               // send button is, so an agent that has seen Discord before
               // finds what it expects. Removed the moment Discord renders
               // a native send button, so it never doubles one.
+              // ── Discord: name the server pills ────────────────────────
+              //
+              // The rail's CLICKABLE element says only "Community Server";
+              // the server's actual name lives on a sibling the page agent
+              // cannot click. Asked for a server by name, the agent was
+              // reduced to clicking anonymous pills by index and checking
+              // what opened — measured, a whole run of that never found
+              // the right one. Copying the name onto the clickable pill
+              // turns the rail into what it looks like: buttons named
+              // 'RayNeo AR Community', one direct click each.
+              if (/(^|\.)discord\.com$/.test(location.hostname) &&
+                  !window.__x3DiscordRailNames) {
+                window.__x3DiscordRailNames = true;
+                var nameRail = function(){
+                  try {
+                    var pills = document.querySelectorAll(
+                      '[data-list-item-id^="guildsnav"]');
+                    for (var i = 0; i < pills.length; i++) {
+                      var p = pills[i];
+                      var sp = p.querySelector('span');
+                      var text = (sp ? sp.textContent : '') || '';
+                      // Measured shape of the hidden span: an optional
+                      // badge phrase, the name, optional extras —
+                      // "Unread messages, The MADE, Scheduled events".
+                      // Badge off the front, extras off at the next comma;
+                      // a rare comma-bearing server name truncates, which
+                      // still matches as a prefix.
+                      var clean = text
+                        .replace(/^\s*(unread messages|\d+\s+mentions?),\s*/i, '')
+                        .split(',')[0].trim();
+                      if (clean && p.getAttribute('aria-label') !== clean) {
+                        p.setAttribute('aria-label', clean);
+                      }
+                    }
+                    // Second surface, measured separately: 76 rows whose
+                    // button says only "Community Server" while the guild
+                    // NAME sits as text in the same row — these are the
+                    // elements the agent's tree actually offers it, and a
+                    // whole run was spent clicking them blind. The row
+                    // text minus the badge word IS the name; stamp it on.
+                    // Renaming also removes them from this selector, so
+                    // each pass only touches rows React has rebuilt.
+                    //
+                    // Named is not enough: measured again, these are inert
+                    // accessibility nodes — the agent clicked the right
+                    // name four times and 'page didn't change'. The row's
+                    // guild ICON carries the guild id in its CDN address,
+                    // which is everything a real navigation needs, so the
+                    // stamp also wires one in.
+                    var badged = document.querySelectorAll(
+                      'div[role="button"][aria-label="Community Server"]');
+                    for (var j = 0; j < badged.length; j++) {
+                      var b = badged[j];
+                      var row = b.closest('[class*="row"]') || b.parentElement;
+                      var t = ((row ? row.textContent : '') || '')
+                        .replace(/Community Server/g, '').trim();
+                      if (t) b.setAttribute('aria-label', t.slice(0, 60));
+                      if (!b.__x3Nav) {
+                        b.__x3Nav = true;
+                        var item = b.closest('[class*="listItem"]') || row;
+                        var img = item && item.querySelector('img[src*="/icons/"]');
+                        var m = img && img.src.match(/\/icons\/(\d+)\//);
+                        if (m) {
+                          (function(gid){
+                            b.addEventListener('click', function(){
+                              location.assign('/channels/' + gid);
+                            }, true);
+                          })(m[1]);
+                        }
+                      }
+                    }
+                  } catch(e){}
+                };
+                setInterval(nameRail, 2000);
+                nameRail();
+              }
+
               if (/(^|\.)discord\.com$/.test(location.hostname) &&
                   !window.__x3DiscordSend) {
                 window.__x3DiscordSend = true;

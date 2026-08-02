@@ -36,7 +36,8 @@ object SitePlaybooks {
 
     private val DISCORD = """
         Site notes for Discord (verified on this device):
-        - The far-left narrow strip is the SERVER rail. Each server there is an item whose label ends with the server's name — 'Unread messages, RayNeo AR Community', '3 mentions, KRVR'. To open a server, click THAT item (its round icon image). Elements labeled just 'Community Server' are decoration: clicking them does nothing, so never pick them.
+        - Names in your task arrived through SPEECH RECOGNITION and are often misspelled — 'ranio' or 'rainio' for 'RayNeo', 'jazz hop' for 'jazzhop'. Never conclude a server or channel doesn't exist because the exact spelling is missing: match what the task names against what is ON SCREEN by sound and closeness, and open the closest-sounding item.
+        - The far-left narrow strip is the SERVER rail: round icon buttons, one per server, each labeled with its server's name ('RayNeo AR Community', 'KRVR'). To open a server, click the icon whose label matches the name you need. Never click rail icons by position or trial — if no label matches, scroll the rail and look again.
         - Two servers can share a word in their names. If the channel you need is not in the server you opened, open the other similarly-named server and look there.
         - Inside a server, the column beside the rail lists channels; each channel is an ordinary link. Click the channel's name to open it; scroll that column if it is not visible.
         - The 'Find or start a conversation' search box only finds people and direct messages. NEVER use it to look for a server or a channel.
