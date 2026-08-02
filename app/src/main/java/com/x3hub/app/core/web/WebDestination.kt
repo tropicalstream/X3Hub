@@ -304,6 +304,20 @@ object WebDestination {
         return joined.takeIf { tld in SPOKEN_TLDS }
     }
 
+    /**
+     * True when [url] is a site's front DOOR rather than a place inside
+     * it: the bare root, or an entry this file's own spoken-site table
+     * mints — discord's is /login, the right landing for a FRESH window
+     * and a demotion for one already inside the app. A window standing
+     * anywhere on the site outranks its own front door.
+     */
+    fun isSiteEntry(url: String): Boolean {
+        val u = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        if ((u.path.isNullOrEmpty() || u.path == "/") && u.query == null) return true
+        val bare = url.removePrefix("https://").removePrefix("http://").trimEnd('/')
+        return SPOKEN_SITES.values.any { it.trimEnd('/') == bare }
+    }
+
     fun webSearchUrl(query: String): String =
         SEARCH_PREFIX + URLEncoder.encode(query.trim(), "UTF-8")
 

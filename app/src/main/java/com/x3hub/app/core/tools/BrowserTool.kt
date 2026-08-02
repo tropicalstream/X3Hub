@@ -218,6 +218,11 @@ class BrowserTool(private val context: Context) : AiTapTool {
         // Spoken aloud verbatim, so: one sentence, no punctuation the TTS has
         // to guess at. The interaction hint rides along only on the first
         // window, where the user has nothing on screen to have learnt it from.
+        // A REUSED window did not "open" — saying it did taught the wearer
+        // their existing window had been replaced.
+        if (sameSite != null) {
+            return Result.success("Brought the ${dest.label} window forward.")
+        }
         val hint = if (open.isEmpty()) " Click it once to use it." else ""
         return Result.success("Opened a browser window $where.$hint")
     }

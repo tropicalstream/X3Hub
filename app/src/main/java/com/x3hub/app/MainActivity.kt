@@ -542,18 +542,26 @@ class MainActivity : AppCompatActivity() {
             // Navigating to where the window already stands is a reload the
             // wearer never asked for — it costs their scroll position and
             // any playing media, and buys a page they are already reading.
+            // The same is true of a window sent to its own site's front
+            // DOOR: "open discord" with a logged-in window sitting in a
+            // channel used to navigate it to /login, which reads as the
+            // window being replaced — bring it forward instead.
             task == null && !target.isShowingSnapshot &&
-                norm(target.currentUrl) == norm(nav) -> {
+                (norm(target.currentUrl) == norm(nav) ||
+                    (WebDestination.sameHost(target.currentUrl, nav) &&
+                        WebDestination.isSiteEntry(nav))) -> {
                 target.activateForErrand()
                 reportErrandHoldRelease()
             }
-            // A site-ROOT navigation with an errand is a means, not the ask:
-            // "open bandcamp and play my purchases" wants the playing, and a
-            // window already inside the site can do that without the reload
-            // — which would kill the very flows (tune, play) it precedes.
-            // URLs with a path or query are the opposite: there the address
-            // carries the request, so they always navigate.
-            task != null && !target.isShowingSnapshot && isSiteRoot(nav) &&
+            // A site-ENTRY navigation with an errand is a means, not the
+            // ask: "open bandcamp and play my purchases" wants the playing,
+            // and a window already inside the site can do that without the
+            // reload — which would kill the very flows (tune, play) it
+            // precedes. URLs that point INSIDE the site are the opposite:
+            // there the address carries the request, so they always
+            // navigate.
+            task != null && !target.isShowingSnapshot &&
+                WebDestination.isSiteEntry(nav) &&
                 WebDestination.sameHost(target.currentUrl, nav) -> {
                 target.activateForErrand()
                 target.whenDocumentReady { ok ->
@@ -635,12 +643,6 @@ class MainActivity : AppCompatActivity() {
     private fun reportErrandHoldRelease() {
         setErrandBusy(false)
     }
-
-    /** True when [url] points at a site's front page rather than a place in it. */
-    private fun isSiteRoot(url: String): Boolean = runCatching {
-        val u = android.net.Uri.parse(url)
-        (u.path.isNullOrEmpty() || u.path == "/") && u.query == null
-    }.getOrDefault(false)
 
     /**
      * Hand the assistant a picture of the window when the page has no text.

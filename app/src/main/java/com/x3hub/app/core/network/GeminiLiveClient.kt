@@ -102,7 +102,14 @@ class GeminiLiveClient(
                 "came. When one request BOTH opens a page and acts on it, put the acting " +
                 "part in open_browser's errand argument — ONE call: 'Play some jazz " +
                 "podcasts' = open_browser(site podcasts, query jazz, errand 'play the " +
-                "first episode'). The errand runs on the right window automatically, " +
+                "first episode'); 'join the rayneo x series channel on discord' = " +
+                "open_browser(site discord, errand 'open the rayneo x series channel'). " +
+                "NEVER call open_browser with only the site when the request continued " +
+                "past opening it — a dropped errand strands the user on the front page " +
+                "(watched live: 'join the channel on discord' arrived as site alone, and " +
+                "nothing joined anything). " +
+                "The errand runs on the right window automatically — the site's EXISTING " +
+                "window when one is open, wherever the user's focus is — " +
                 "which a separate page_agent call can only guess at. " +
                 "'Find X on that page and play it' = page_agent with " +
                 "the whole errand in one task. The agent CANNOT hear the user and knows " +
