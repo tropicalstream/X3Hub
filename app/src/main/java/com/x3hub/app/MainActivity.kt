@@ -817,10 +817,60 @@ class MainActivity : AppCompatActivity() {
                 else WindowBridge.Reply(false, "There is no page to go forward to.")
             )
             "reload", "refresh" -> { w.reload(); reply(WindowBridge.Reply(true, "Reloading $title.")) }
+            "maximize", "maximise", "fullscreen", "full_screen" -> {
+                // The top of the ladder in one word, not one "bigger" per
+                // breath — four resize commands to reach full size is a
+                // chore nobody should have to speak.
+                var grew = false
+                while (w.resizeStep(1)) grew = true
+                hudPinBoardController?.refreshZone()
+                reply(
+                    if (grew) WindowBridge.Reply(true, "Made $title full screen.")
+                    else WindowBridge.Reply(false, "$title is already as big as it can get here.")
+                )
+            }
+            "minimize", "minimise" -> {
+                // Minimize = the window becomes its own pin: thumbnail on
+                // the board, address behind it, tap to bring it back. The
+                // bookmark flow already IS that; minimizing just closes the
+                // live window once the pin exists.
+                bookmarkVisiblePage { saved ->
+                    when {
+                        !saved.ok -> reply(
+                            WindowBridge.Reply(
+                                false,
+                                saved.error ?: "Couldn't minimize $title."
+                            )
+                        )
+                        // No pin, no minimize: closing a window whose pin
+                        // never landed (full board, failed capture) would
+                        // make the page VANISH — the opposite of shelving
+                        // it. The bookmark still saved; say exactly that.
+                        !saved.pinned -> reply(
+                            WindowBridge.Reply(
+                                false,
+                                "There's no room on the board to pin $title, so the " +
+                                    "window stays open. It IS saved in bookmarks."
+                            )
+                        )
+                        else -> {
+                            hudPinBoardController?.pinIdFor(w)?.let { HudPinStore.remove(it) }
+                            reply(
+                                WindowBridge.Reply(
+                                    true,
+                                    "Minimized $title to a pin on the HUD — tapping it " +
+                                        "brings the page back."
+                                )
+                            )
+                        }
+                    }
+                }
+            }
             else -> reply(
                 WindowBridge.Reply(
                     false,
-                    "I can close, scroll, make it bigger or smaller, go back, or reload."
+                    "I can close, minimize, maximize, scroll, make it bigger or " +
+                        "smaller, go back, or reload."
                 )
             )
         }
@@ -901,14 +951,22 @@ class MainActivity : AppCompatActivity() {
         // pinned flag rides back separately rather than being smuggled
         // through the title, which once produced the self-contradicting
         // "…saved, but not pinned…and pinned it to the HUD."
-        val pinned = thumbPath != null && HudPinStore.add(
+        //
+        // One pin per address, like the store keeps one bookmark per
+        // address: minimize→restore→minimize is a CYCLE, and without the
+        // check every lap left another identical tile on the board.
+        val alreadyPinned = HudPinStore.all().any {
+            it.type == HudPinStore.TYPE_BOOKMARK &&
+                it.sourceUrl.equals(url, ignoreCase = true)
+        }
+        val pinned = alreadyPinned || (thumbPath != null && HudPinStore.add(
             HudPinStore.HudPin(
                 type = HudPinStore.TYPE_BOOKMARK,
                 label = title,
                 payload = thumbPath,
                 sourceUrl = url
             )
-        )
+        ))
         Log.i(TAG, "bookmarked '$title' ($url) thumb=${thumbPath != null} pinned=$pinned")
         return BookmarkBridge.Saved(true, title = title, pinned = pinned)
     }

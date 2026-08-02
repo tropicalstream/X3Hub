@@ -44,7 +44,10 @@ class WindowControlTool(@Suppress("unused") private val context: Context) : AiTa
     override suspend fun execute(args: Map<String, String>): Result<String> {
         val action = arg(args, "action", "command").lowercase()
         if (action.isEmpty()) {
-            return Result.success("Say what to do with the window: close, scroll, bigger, smaller, back or reload.")
+            return Result.success(
+                "Say what to do with the window: close, minimize, maximize, " +
+                    "scroll, bigger, smaller, back or reload."
+            )
         }
         val reply = WindowBridge.request(action, arg(args, "amount", "direction", "value"))
         return Result.success(reply.text)
