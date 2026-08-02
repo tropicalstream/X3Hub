@@ -19,6 +19,18 @@ class ToolDispatcher(
 
     companion object {
         private const val TAG = "ToolDispatcher"
+
+        /**
+         * True when this call is a HANDOFF — the tool dispatches work
+         * that continues without the session, so the conversation should
+         * end once the model finishes acknowledging, exactly as it does
+         * for page errands. Lives here rather than in the pipeline
+         * because which calls hand off is tool knowledge, and rather
+         * than in the tool because by the time execute() returns, the
+         * caller no longer knows what kind of call it made.
+         */
+        fun endsConversation(name: String, args: String): Boolean =
+            name == "camera_action" && args.contains("take_photo")
     }
 
     private val tools: Map<String, AiTapTool> = listOf(

@@ -788,7 +788,10 @@ class GeminiLiveClient(
                 "The glasses camera. action='take_photo': take a NEW full-resolution " +
                     "picture, pin it to the HUD board and save it to the gallery — works " +
                     "whether or not the camera preview is on. Use for 'take a picture', " +
-                    "'take a photo', 'snap this', 'photograph that'. " +
+                    "'take a photo', 'snap this', 'photograph that'. It is a HANDOFF: the " +
+                    "camera works on its own after your call — say ONE short line that the " +
+                    "photo is being taken, then stop; the conversation ends on its own and " +
+                    "the pin appearing is the result. " +
                     "action='save_photo': save the frame the camera is CURRENTLY streaming " +
                     "into this conversation — only for 'save what you're seeing' while the " +
                     "preview is on; it needs the stream (double-tap the left temple arm).")

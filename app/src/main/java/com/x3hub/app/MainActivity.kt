@@ -1872,7 +1872,8 @@ class MainActivity : AppCompatActivity() {
         // Either machinery: the LLM page agent OR a native errand in
         // flight. The wearer cannot tell them apart and should not have
         // to — "the agent is on it" earns the same gear either way.
-        pageAgentBusy = AgentActivityBridge.busy || errandBusy,
+        pageAgentBusy = AgentActivityBridge.busy || errandBusy ||
+            com.x3hub.app.core.bridge.PhotoCaptureBridge.busy,
         mediaMuted = isSystemMediaMuted()
     )
 
@@ -2274,6 +2275,12 @@ class MainActivity : AppCompatActivity() {
         // it flips — the HUD strip's glyph, and the dim readout, where it is
         // the only sign of life the wearer gets.
         AgentActivityBridge.setListener {
+            uiHandler.post {
+                renderActivityGlyphs()
+                dimController?.refreshReadout()
+            }
+        }
+        com.x3hub.app.core.bridge.PhotoCaptureBridge.setListener {
             uiHandler.post {
                 renderActivityGlyphs()
                 dimController?.refreshReadout()

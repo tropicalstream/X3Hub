@@ -8,6 +8,8 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
+import com.x3hub.app.core.bridge.HudStateBridge
+import kotlinx.coroutines.launch
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -57,30 +59,51 @@ class CameraTool(
      * camera button produces, not a frame skimmed off the preview stream
      * — save it to the gallery, and pin it to the HUD board.
      *
-     * Works with the camera in any state: streaming shoots through the
-     * already-bound still use case, off opens the camera for this one
-     * frame. The pin gets its own private copy, because a pin whose
-     * picture lives in shared storage dies the day a gallery cleanup
-     * deletes the file out from under it.
+     * A HANDOFF, exactly like a page errand: the tool returns the moment
+     * the capture is dispatched, because a cold camera plus a 12MP encode
+     * is seconds of work, and the first cut spent them INSIDE the tool
+     * turn — the model sat mute holding the mic while the shutter ground
+     * away, then the session lingered its idle clock on top. Now the
+     * model speaks its one line, the session hangs up, the ⚙ glyph shows
+     * the capture working, and the pin appearing IS the result.
      */
-    private suspend fun takePhoto(title: String): Result<String> {
+    private fun takePhoto(title: String): Result<String> {
         val capturer = com.x3hub.app.core.camera.StillCameraBridge.capturer
             ?: return Result.failure(
                 IllegalStateException("The camera isn't available right now.")
             )
-        val jpeg = kotlinx.coroutines.withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
-            kotlinx.coroutines.suspendCancellableCoroutine<ByteArray?> { cont ->
-                capturer { bytes ->
-                    if (cont.isActive) cont.resume(bytes) { }
+        com.x3hub.app.core.bridge.PhotoCaptureBridge.set(true)
+        captureScope.launch {
+            try {
+                val jpeg = kotlinx.coroutines.withTimeoutOrNull(CAPTURE_TIMEOUT_MS) {
+                    kotlinx.coroutines.suspendCancellableCoroutine<ByteArray?> { cont ->
+                        capturer { bytes ->
+                            if (cont.isActive) cont.resume(bytes) { }
+                        }
+                    }
                 }
+                if (jpeg == null || jpeg.isEmpty()) {
+                    Log.w(TAG, "take_photo: capture failed or timed out")
+                    // The session that asked is gone by design; the HUD
+                    // notification line is the surface that remains.
+                    HudStateBridge.update {
+                        it.copy(notification = "The photo could not be taken.")
+                    }
+                    return@launch
+                }
+                storePhoto(jpeg, title)
+            } finally {
+                com.x3hub.app.core.bridge.PhotoCaptureBridge.set(false)
             }
         }
-        if (jpeg == null || jpeg.isEmpty()) {
-            return Result.failure(
-                IllegalStateException("The camera could not take the picture.")
-            )
-        }
+        return Result.success(
+            "Taking the photo — it will appear on the HUD as a pin and in the " +
+                "glasses gallery. The camera works on its own from here."
+        )
+    }
 
+    /** The storage half of [takePhoto], off the tool turn. */
+    private fun storePhoto(jpeg: ByteArray, title: String) {
         val timestamp = FILENAME_TIMESTAMP.format(Date())
         val safeTitle = title.replace(Regex("[^A-Za-z0-9 _.-]"), "").trim()
             .replace(Regex("\\s+"), "_")
@@ -104,25 +127,25 @@ class CameraTool(
             )
         )
         if (pinWriteOk && !pinned) runCatching { pinFile.delete() }
-
-        return when {
-            pinned && galleryOk -> Result.success(
-                "Took the photo — it's pinned to the HUD and saved in the " +
-                    "glasses gallery (DCIM/$DCIM_SUBFOLDER). Tapping the pin opens it full screen."
-            )
-            pinned -> Result.success(
-                "Took the photo and pinned it to the HUD, but it could not " +
-                    "be saved to the gallery."
-            )
-            galleryOk -> Result.success(
-                "Took the photo and saved it to the glasses gallery, but the " +
-                    "HUD board is full — remove a pin to make room."
-            )
-            else -> Result.failure(
-                IOException("The photo was taken but could not be stored.")
-            )
+        when {
+            pinned -> Unit                     // the pin on the board says it all
+            galleryOk -> HudStateBridge.update {
+                it.copy(notification = "Photo saved to the gallery — the board is full.")
+            }
+            else -> HudStateBridge.update {
+                it.copy(notification = "The photo could not be stored.")
+            }
         }
     }
+
+    /**
+     * Off-turn work only. SupervisorJob so one failed capture cannot
+     * poison the next; never cancelled — the tool object lives as long
+     * as the dispatcher that owns it.
+     */
+    private val captureScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
 
     private fun savePhoto(title: String): Result<String> {
         val base64 = frameProvider()?.trim().orEmpty()

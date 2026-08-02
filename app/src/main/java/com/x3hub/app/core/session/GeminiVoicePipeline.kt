@@ -759,6 +759,15 @@ class GeminiVoicePipeline(context: Context) {
                     liveSession?.sendToolResponse(callId, toolName, resultText) == true
                 }.getOrDefault(false)
                 Log.i(TAG, "sendToolResponse returned $ok name=$toolName callId=$callId")
+                // A handoff call ends the conversation the same way a page
+                // errand does: the work continues without the session, so
+                // once the model finishes saying so, hang up. Success only —
+                // a failed handoff leaves the session open for the user to
+                // adjust and retry by voice.
+                if (resultSucceeded && ToolDispatcher.endsConversation(toolName, args)) {
+                    Log.i(TAG, "tool handoff ($toolName) — ending session after this turn")
+                    endSessionAfterTurn()
+                }
                 HudStateBridge.update { it.copy(notification = null) }
             } finally {
                 toolCallsInFlight.decrementAndGet()
