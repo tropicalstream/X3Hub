@@ -40,8 +40,7 @@ class GeminiSessionForegroundService : LifecycleService() {
         override fun currentState(): HudStateBridge.State = HudStateBridge.current()
         override fun toggleCamera() = this@GeminiSessionForegroundService.toggleCamera()
         override fun sendDebugText(text: String) { pipeline.sendDebugText(text) }
-        override fun holdSessionOpen(ms: Long) { pipeline.holdSessionOpen(ms) }
-        override fun sendSessionNote(text: String) { pipeline.sendDebugText(text) }
+        override fun endSessionAfterTurn() { pipeline.endSessionAfterTurn() }
         override fun sendDebugPcm16File(fileName: String) {
             pipeline.sendDebugPcm16File(fileName)
         }

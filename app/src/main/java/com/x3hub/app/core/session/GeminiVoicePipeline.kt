@@ -92,22 +92,25 @@ class GeminiVoicePipeline(context: Context) {
     private val toolCallsInFlight = AtomicInteger(0)
 
     /**
-     * Uptime deadline until which the session must stay open for work
-     * running OUTSIDE it — a page-agent errand dispatched by a tool call
-     * returns immediately, the model acknowledges, the turn completes, and
-     * the 5s between-turn clock would then close the session under an
-     * errand that takes half a minute. A deadline rather than a flag: the
-     * holder can crash without leaking an immortal session, because the
-     * hold expires on its own.
+     * The page-agent handoff: the wearer spoke one command, the agent took
+     * it, and the session's only remaining job is to finish saying so.
+     * Holding it open past that point is an open microphone next to a
+     * wearer who has signalled they are DONE interacting. (This replaced a
+     * hold-open-for-the-outcome deadline that kept the mic live for up to
+     * 90 seconds so the model could narrate the errand's result.)
+     *
+     * Two stages, not one. Armed at the errand dispatch, which happens
+     * MID-turn: the model still owes its spoken acknowledgment, and the
+     * first cut of this closed the session 250ms after the tool reply —
+     * before a word of it played. Eligibility comes from the turn-complete
+     * that follows the arm; the watchdog then closes as soon as the audio
+     * has drained. A model that never completes the turn falls through to
+     * the ordinary idle clock, so the session still cannot outlive its
+     * timeout.
      */
-    private val externalWorkDeadline = java.util.concurrent.atomic.AtomicLong(0L)
-
-    /** Keep the session alive for [ms] more; 0 releases the hold early. */
-    fun holdSessionOpen(ms: Long) {
-        externalWorkDeadline.set(
-            if (ms <= 0L) 0L else SystemClock.uptimeMillis() + ms.coerceAtMost(120_000L)
-        )
-    }
+    @Volatile private var closeAfterTurnArmed = false
+    @Volatile private var closeAfterTurnEligible = false
+    fun endSessionAfterTurn() { closeAfterTurnArmed = true }
     private val toolTurnCoordinator = ToolTurnCoordinator()
     private val bufferedToolAudioLock = Any()
     private val bufferedToolAudio = ArrayList<BufferedModelAudio>()
@@ -178,6 +181,10 @@ class GeminiVoicePipeline(context: Context) {
         toolTurnCoordinator.resetSession()
         clearBufferedToolAudio()
         serverAudioStreamPaused = false
+        // A leftover dim handoff must not guillotine the NEXT session on
+        // its first quiet moment.
+        closeAfterTurnArmed = false
+        closeAfterTurnEligible = false
         bargeInEnabled = HubPrefs.bargeInEnabled(appContext)
         Log.i(TAG, "activate(): barge-in ${if (bargeInEnabled) "on" else "off (wait for reply)"}")
 
@@ -649,6 +656,10 @@ class GeminiVoicePipeline(context: Context) {
                 if (!isSessionEpochCurrent(epoch)) return
                 val completedAt = SystemClock.uptimeMillis()
                 idlePolicy.onTurnComplete(completedAt)
+                // The turn that finished after the handoff armed is the
+                // acknowledgment the wearer is owed; once its audio drains,
+                // the watchdog may close the session.
+                if (closeAfterTurnArmed) closeAfterTurnEligible = true
                 val completion = toolTurnCoordinator.onTurnComplete()
                 val bufferedAudio = drainBufferedToolAudio()
                 if (completion.deliverBufferedRemainder) {
@@ -809,13 +820,22 @@ class GeminiVoicePipeline(context: Context) {
                 if (!liveSessionReady || !isSessionEpochCurrent(epoch)) continue
                 val now = SystemClock.uptimeMillis()
                 val busy = toolCallsInFlight.get() > 0 ||
-                    audioPlayer.isActivelySpeaking(windowMs = 600L) ||
-                    now < externalWorkDeadline.get()
+                    audioPlayer.isActivelySpeaking(windowMs = 600L)
                 if (busy) {
                     idlePolicy.onConversationActivity(now)
                     continue
                 }
                 val idle = idlePolicy.snapshot(now)
+                // Errand handoff: the errand is dispatched, the
+                // acknowledgment turn has completed, and its audio has
+                // drained (busy was false above). The idle clocks below
+                // exist to leave room for a conversation to continue; the
+                // wearer asked for the opposite.
+                if (closeAfterTurnEligible) {
+                    Log.i(TAG, "Errand handoff: acknowledgment finished — ending session now")
+                    shutdown(reason = null)
+                    break
+                }
                 if (!serverAudioStreamPaused &&
                     idle.shouldFlushPendingAudio(PENDING_AUDIO_FLUSH_MS)
                 ) {

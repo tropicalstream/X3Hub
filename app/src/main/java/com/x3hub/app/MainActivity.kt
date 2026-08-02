@@ -481,13 +481,15 @@ class MainActivity : AppCompatActivity() {
         // the wearer cannot see is an answer hidden behind furniture.
         c?.raiseToFront(target)
         c?.browserWindows()?.forEach { if (it !== target) it.deactivate() }
-        // A task dispatched mid-session is an errand the session is waiting
-        // on: the tool reply comes back instantly, the turn completes, and
-        // the 5s between-turn clock would close the conversation under a
-        // 30-second errand. The hold is a deadline, not a flag — a wedged
-        // agent costs at most its own timeout, and completion releases it.
+        // An errand dispatched mid-session ends the conversation: one
+        // command, one spoken acknowledgment, microphone CLOSED. The ⚙
+        // glyph is the progress report and the errand's own effect (music
+        // playing, a page opening) is the outcome. This replaced a 90s
+        // session hold that waited to narrate the result — measured, that
+        // was a minute of open mic pointed at a wearer who had already
+        // said everything they meant to say.
         if (HudStateBridge.current().phase != HudStateBridge.VoicePhase.IDLE) {
-            runCatching { voiceServiceApi?.holdSessionOpen(90_000L) }
+            runCatching { voiceServiceApi?.endSessionAfterTurn() }
         }
         val nav = errand.navigateTo
         val task = errand.task
@@ -616,30 +618,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Close the orchestrator's loop: release the hold, say what happened. */
+    /**
+     * An errand reached a terminal. The session that dispatched it is
+     * already closed (or closing) by the handoff contract, so there is no
+     * conversation to narrate into — and a session live NOW would be a
+     * NEW conversation, where a note about the old errand's outcome is an
+     * interruption from nowhere. The glyph goes out; the outcome stays in
+     * the log for diagnosis.
+     */
     private fun reportErrandOutcome(what: String, failed: Boolean = false) {
         setErrandBusy(false)
-        // The release is unconditional — a hold acquired while the session
-        // was live must not survive it going idle, or the stale deadline
-        // pins the wearer's NEXT session open for nothing.
-        runCatching { voiceServiceApi?.holdSessionOpen(0L) }
-        if (HudStateBridge.current().phase == HudStateBridge.VoicePhase.IDLE) return
-        val tag = if (failed) "[PAGE AGENT FAILED]" else "[PAGE AGENT FINISHED]"
-        runCatching {
-            voiceServiceApi?.sendSessionNote(
-                "$tag $what — relay this to the user in one short sentence."
-            )
-        }
+        Log.i(TAG, "errand ${if (failed) "failed" else "done"}: ${what.take(160)}")
     }
 
-    /**
-     * Release the hold WITHOUT a note — for outcomes the tool reply already
-     * described ("Loading X in the current window"). A note on top made the
-     * assistant narrate the same navigation twice.
-     */
+    /** Same terminal, for outcomes the tool reply already described. */
     private fun reportErrandHoldRelease() {
         setErrandBusy(false)
-        runCatching { voiceServiceApi?.holdSessionOpen(0L) }
     }
 
     /** True when [url] points at a site's front page rather than a place in it. */
@@ -1127,27 +1121,18 @@ class MainActivity : AppCompatActivity() {
                 window,
                 showNotice = { msg -> showNotice(msg) },
                 onResult = { message, ok ->
-                    // Live session = the wearer is mid-conversation with the
-                    // orchestrator; the result goes INTO that conversation so
-                    // one voice narrates and the next step can follow. The
-                    // hold is released either way — the errand is over, and
-                    // so is the errand glyph.
+                    // The conversation that dispatched this errand ended at
+                    // the handoff — that is the contract now, in dim and
+                    // out of it. A session live at THIS moment is a new
+                    // conversation, and injecting the old errand's outcome
+                    // into it is a voice from nowhere about something the
+                    // wearer finished asking minutes ago. The result goes
+                    // to the HUD notice line instead, same as an errand
+                    // started by double-tap; false tells the agent exactly
+                    // that.
                     setErrandBusy(false)
-                    val live = HudStateBridge.current().phase !=
-                        HudStateBridge.VoicePhase.IDLE
-                    runCatching { voiceServiceApi?.holdSessionOpen(0L) }
-                    if (live) {
-                        runCatching {
-                            voiceServiceApi?.sendSessionNote(
-                                "[PAGE AGENT ${if (ok) "FINISHED" else "FAILED"}] " +
-                                    message.take(500) +
-                                    " — relay this to the user in one short sentence" +
-                                    if (ok) ", then continue their errand if steps remain."
-                                    else ", and suggest what to try instead."
-                            )
-                        }
-                    }
-                    live
+                    Log.i(TAG, "agent ${if (ok) "done" else "failed"}: ${message.take(160)}")
+                    false
                 }
             )
         }

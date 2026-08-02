@@ -93,8 +93,9 @@ class BrowserTool(private val context: Context) : AiTapTool {
             if (sent) {
                 return Result.success(
                     "Loading ${dest.label} in the current window" +
-                        (dest.errand?.let { " and asking it to $it. The result will follow" }
-                            ?: "") + "."
+                        (dest.errand?.let {
+                            " and asking it to $it. The agent works on its own from here"
+                        } ?: "") + "."
                 )
             }
             // No activity listening — open normally below rather than
@@ -201,7 +202,7 @@ class BrowserTool(private val context: Context) : AiTapTool {
         if (dest.errand != null) {
             return Result.success(
                 "Opening ${dest.label} and asking it to ${dest.errand}. " +
-                    "The result will follow."
+                    "The agent works on its own from here."
             )
         }
 

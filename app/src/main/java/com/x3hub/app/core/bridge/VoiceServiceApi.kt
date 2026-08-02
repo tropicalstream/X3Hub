@@ -15,19 +15,14 @@ interface VoiceServiceApi {
     fun shutdownVoice()
 
     /**
-     * Keep the session alive while work OUTSIDE it runs on the wearer's
-     * behalf — a page-agent errand takes 15-60 seconds, and the between-turn
-     * idle clock is five. Pass 0 to release the hold early; every hold has a
-     * deadline, so a crashed errand can only ever cost its own timeout.
+     * End the session as soon as the model's current turn is complete and
+     * its audio has finished playing — the page-agent handoff: the agent
+     * has the command and the wearer wants the microphone closed the
+     * moment Gemini finishes saying so, not five seconds later. This
+     * replaced a hold-the-session-open-for-the-outcome mechanism; the ⚙
+     * glyph reports progress and the agent speaks its own result.
      */
-    fun holdSessionOpen(ms: Long)
-
-    /**
-     * Feed a result produced outside the session INTO it, phrased for the
-     * model ("[PAGE AGENT] ..."), so the orchestrating voice can relay it
-     * and take the next step. No-op when no session is live.
-     */
-    fun sendSessionNote(text: String)
+    fun endSessionAfterTurn()
 
     /**
      * Hold the microphone privilege without starting a voice session.
