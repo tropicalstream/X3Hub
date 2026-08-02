@@ -661,7 +661,10 @@ class GeminiLiveClient(
                                 "subject: 'podcasts' (also listennotes or podchaser — all " +
                                 "three open the built-in podcast player), 'bandcamp', " +
                                 "'youtube', 'wikipedia', 'archive', 'reddit', 'github', " +
-                                "'ebay', 'amazon', 'radio garden', 'radio4all'. Pair it " +
+                                "'ebay', 'amazon', 'radio garden', 'radio4all', " +
+                                "'discord' (opens Discord's own login page; the user " +
+                                "signs in there themselves, by QR or password — never " +
+                                "ask for or handle their credentials). Pair it " +
                                 "with 'query'. Prefer this over building a search URL " +
                                 "yourself — the site's real search address is known here " +
                                 "and guessing one tends to miss. site and query behave " +

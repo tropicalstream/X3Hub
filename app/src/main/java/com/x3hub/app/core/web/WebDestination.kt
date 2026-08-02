@@ -176,6 +176,11 @@ object WebDestination {
                 "search for $query and play it"
             url.startsWith(LocalPages.PLAYER_URL) ||
                 MEDIA_HOSTS.any { host == it || host.endsWith(".$it") } -> "play $query"
+            // Discord: the query names a PLACE — "rayneo server" means go
+            // there. The one search box the layout offers is the DM search,
+            // which looks in friends, so a "search for" phrasing aims the
+            // agent at exactly the wrong control.
+            host == "discord.com" || host.endsWith(".discord.com") -> "go to $query"
             else -> "search for $query"
         }
     }
@@ -277,7 +282,11 @@ object WebDestination {
         // well-formed, passes every check, and does not resolve at all —
         // measured, it answers nothing. Having corrected the name, correct it
         // whatever ending was attached.
-        if (joined.contains('.')) {
+        // Only when what would be stripped IS a suffix: on a URL with a
+        // path — "discord.com/channels/@me" — the text after the last dot
+        // is ".com/channels/@me", and "correcting" it rewrote a precise
+        // in-site address into the site's front door.
+        if (joined.contains('.') && !joined.substringAfterLast('.').contains('/')) {
             SPOKEN_SITES[joined.substringBeforeLast('.')]?.let { return it }
         }
         // No spoken "dot" means this was never a dictated address; leave it
@@ -338,7 +347,14 @@ object WebDestination {
         "podchaser" to "x3hub.local/podplayer.html",
         "podcasts" to "x3hub.local/podplayer.html",
         "podcast" to "x3hub.local/podplayer.html",
-        "podcastplayer" to "x3hub.local/podplayer.html"
+        "podcastplayer" to "x3hub.local/podplayer.html",
+        // Discord lands on ITS OWN login page, deliberately: logged out it
+        // shows the QR (scan with the phone's Discord app — no typing on a
+        // temple pad) beside the email/password form, and logged in it
+        // redirects itself to the channel list. The app never handles the
+        // credentials either way; the page does, exactly as on any browser.
+        "discord" to "discord.com/login",
+        "discord.com" to "discord.com/login"
     )
 
     /**

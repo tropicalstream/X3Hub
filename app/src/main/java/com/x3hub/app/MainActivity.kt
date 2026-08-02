@@ -2237,7 +2237,11 @@ class MainActivity : AppCompatActivity() {
 
         hudPinBoardController?.onBrowserWindowCreated = { w ->
             agentFor(w)
-            w.onPageInputFocus = { showOnScreenKeyboard(w) }
+            // Not while the agent drives: it focuses fields as part of its
+            // work (Discord's composer, a search box), and the keyboard
+            // rising over a window the WEARER isn't typing into is pure
+            // noise — worse, it steals half the screen mid-task.
+            w.onPageInputFocus = { if (!w.agentDriving) showOnScreenKeyboard(w) }
             w.onPageInputBlur = { }   // the hide timer owns dismissal
             // A window born while the mic is open must be born quiet. This
             // is the ordinary case, not an edge one: "open that video" is

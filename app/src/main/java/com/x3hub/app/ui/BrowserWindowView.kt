@@ -887,7 +887,17 @@ class BrowserWindowView @JvmOverloads constructor(
 
     private fun injectImageFit() {
         runCatching { webView.evaluateJavascript(IMAGE_FIT_JS, null) }
-        runCatching { webView.evaluateJavascript(VIEWPORT_FIT_JS, null) }
+        // The fit script must aim at THIS page's layout width, not the
+        // constant: it takes OWNERSHIP of the page's viewport meta and
+        // rewrites it on every resize, so a 320 baked in here silently
+        // vetoes the per-site width — measured on Discord, the meta read
+        // "width=320" written by our own script while every engine-side
+        // scale said 940.
+        runCatching {
+            webView.evaluateJavascript(
+                VIEWPORT_FIT_JS.replace("__X3_LAYOUT_W__", layoutCssWidth.toString()), null
+            )
+        }
         runCatching { webView.evaluateJavascript(CANVAS_FIX_JS, null) }
         readEdgeInsets()
     }
@@ -1366,6 +1376,11 @@ class BrowserWindowView @JvmOverloads constructor(
             ) {
                 super.onPageStarted(view, url, favicon)
                 navSeq++
+                // Link-following and redirects reach a new host without
+                // passing through loadUrl; a late adopt here may only bite
+                // on the NEXT commit, but that is still the right width
+                // for every subsequent page of the visit.
+                applyLayoutWidthFor(url)
                 // A navigation needs a live renderer whatever the mic is
                 // doing — see documentReadyForPause. Re-sync so a window
                 // paused under the hold wakes for the load it was asked for.
@@ -1968,7 +1983,68 @@ class BrowserWindowView @JvmOverloads constructor(
     }
 
     private fun pageScalePercent(widthPx: Int): Int =
-        (widthPx * 100 / MOBILE_LAYOUT_CSS_WIDTH).coerceAtLeast(1)
+        (widthPx * 100 / layoutCssWidth).coerceAtLeast(1)
+
+    /**
+     * The CSS width the CURRENT page lays out against. 320 — a narrow
+     * phone — for almost everything; see [layoutWidthFor] for the one
+     * class of exception.
+     *
+     * Backed and clamped rather than a plain `= MOBILE_LAYOUT_CSS_WIDTH`:
+     * the constructor applies the page scale BEFORE property initializers
+     * this far down the class have run, and dividing by the uninitialized
+     * zero took the whole activity down at startup.
+     */
+    private var layoutCssWidthBacking = 0
+    private var layoutCssWidth: Int
+        get() = if (layoutCssWidthBacking > 0) layoutCssWidthBacking else MOBILE_LAYOUT_CSS_WIDTH
+        set(value) { layoutCssWidthBacking = value }
+
+    /**
+     * Which layout width a destination needs.
+     *
+     * Discord is the exception that earns this table. At phone width its
+     * web app serves a cut-down shell whose friends screen is the WHOLE
+     * interface: measured on the glasses, the DOM contains no server rail,
+     * no channel list, and the guild data is never even fetched — an agent
+     * asked to "go to the rayneo server" can only find the friends search,
+     * which is exactly the wrong thing, and no amount of prompting fixes a
+     * page the information is not IN. At desktop width Discord serves the
+     * real three-pane app (server rail, channels, composer — and the QR
+     * pane on the login page), so the window trades text size for an
+     * interface where the task is possible at all. The wearer resizes up
+     * for reading; the agent never needed the text large.
+     */
+    private fun layoutWidthFor(url: String?): Int {
+        val host = runCatching { android.net.Uri.parse(url ?: return MOBILE_LAYOUT_CSS_WIDTH).host }
+            .getOrNull().orEmpty().lowercase()
+        return if (host == "discord.com" || host.endsWith(".discord.com")) {
+            DESKTOP_LAYOUT_CSS_WIDTH
+        } else {
+            MOBILE_LAYOUT_CSS_WIDTH
+        }
+    }
+
+    /**
+     * Adopt the layout width [url] needs, ahead of navigating there.
+     * setInitialScale is read by the engine at navigation commit, so this
+     * must run before the load that should feel it — loadUrl for our own
+     * navigations, onPageStarted for link-following and redirects.
+     */
+    private fun applyLayoutWidthFor(url: String?): Boolean {
+        val want = layoutWidthFor(url)
+        if (want == layoutCssWidth) return false
+        layoutCssWidth = want
+        // The width and the identity travel together: Discord ignores the
+        // viewport and serves its cut-down mobile shell to any Mobile UA,
+        // so the desktop width without the desktop UA buys a wide, empty
+        // friends list. Takes effect on the same navigation the scale does.
+        webView.settings.userAgentString =
+            if (want == DESKTOP_LAYOUT_CSS_WIDTH) DESKTOP_UA else MODERN_UA
+        applyPageScale(windowWidth)
+        Log.i(TAG, "layout width -> $want for ${url?.take(48)}")
+        return true
+    }
 
     // ------------------------------------------------------------------
     // Content + lifecycle
@@ -1997,15 +2073,29 @@ class BrowserWindowView @JvmOverloads constructor(
         // perfectly well. Upgrading first means the secure version is used
         // whenever it exists, and the fallback below covers the sites where
         // it genuinely does not.
+        val widthChanged = applyLayoutWidthFor(full)
+        val target: String
         if (full.startsWith("http://", ignoreCase = true)) {
             cleartextFallbackUrl = full
-            val secure = "https://" + full.substring("http://".length)
-            Log.i(TAG, "upgrading to https: $secure")
-            webView.loadUrl(secure)
-            return
+            target = "https://" + full.substring("http://".length)
+            Log.i(TAG, "upgrading to https: $target")
+        } else {
+            cleartextFallbackUrl = null
+            target = full
         }
-        cleartextFallbackUrl = null
-        webView.loadUrl(full)
+        // A scale set in the same stack as the navigation is not seen by
+        // it: measured on this engine, setInitialScale + loadUrl back to
+        // back committed at the OLD scale — and a plain post{} was not
+        // enough either. The one pattern PROVEN to adopt a new scale here
+        // is commitSize's apply-then-reload, whose evaluateJavascript
+        // round-trips reach the renderer and come back before the load is
+        // issued. Reproduce exactly that gap, paid only when the width
+        // actually changed.
+        if (widthChanged) {
+            webView.evaluateJavascript("1") { post { webView.loadUrl(target) } }
+        } else {
+            webView.loadUrl(target)
+        }
     }
 
     /** Forward the host activity's onPause. */
@@ -2220,7 +2310,7 @@ class BrowserWindowView @JvmOverloads constructor(
         private val VIEWPORT_FIT_JS = """
             (function(){
               if (window.__x3ViewportFit) return 'already';
-              var target = $MOBILE_LAYOUT_CSS_WIDTH;
+              var target = __X3_LAYOUT_W__;
 
               var owned = false;
 
@@ -2804,9 +2894,30 @@ class BrowserWindowView @JvmOverloads constructor(
         /** Narrow-phone width every responsive site is built for. */
         private const val MOBILE_LAYOUT_CSS_WIDTH = 320
 
+        /**
+         * The width served to sites that cripple their narrow layout (see
+         * [layoutWidthFor]). 940 is Discord's own desktop minimum window
+         * width, so the full three-pane app is guaranteed rather than
+         * hoped for at some in-between width whose behavior nobody
+         * documents.
+         */
+        private const val DESKTOP_LAYOUT_CSS_WIDTH = 940
+
         private const val MODERN_UA =
             "Mozilla/5.0 (Linux; Android 12; RayNeo X3 Pro) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+
+        /**
+         * For the sites on the desktop layout width. Discord ignores the
+         * viewport and keys its layout off the USER AGENT: measured at a
+         * true 940 CSS px viewport, a mobile UA still got the cut-down
+         * friends-only shell. Same engine version as [MODERN_UA] — only
+         * the platform token changes, because lying about the engine is
+         * what breaks challenge pages.
+         */
+        private const val DESKTOP_UA =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
         /**
          * "Get our app" interstitials, killed on sight.
@@ -3176,6 +3287,72 @@ class BrowserWindowView @JvmOverloads constructor(
                 setInterval(attach, 2000);
               }
 
+              // ── Discord: a send control something can CLICK ───────────
+              //
+              // Desktop Discord sends on Enter and draws no send button.
+              // Neither of this window's writers has an Enter key to give
+              // it: the page agent's toolset is click/type/scroll, and the
+              // wearer's send path (the glasses keyboard's own ENTER)
+              // works but shouldn't be the only one. One small button,
+              // pinned to the composer's corner, gives both of them the
+              // same affordance — labeled the way Discord's own mobile
+              // send button is, so an agent that has seen Discord before
+              // finds what it expects. Removed the moment Discord renders
+              // a native send button, so it never doubles one.
+              if (/(^|\.)discord\.com$/.test(location.hostname) &&
+                  !window.__x3DiscordSend) {
+                window.__x3DiscordSend = true;
+                var sendEnter = function(box){
+                  ['keydown','keypress','keyup'].forEach(function(t){
+                    box.dispatchEvent(new KeyboardEvent(t, {
+                      key:'Enter', code:'Enter', keyCode:13, which:13,
+                      bubbles:true, cancelable:true
+                    }));
+                  });
+                };
+                var ensureSend = function(){
+                  try {
+                    var box = document.querySelector(
+                      '[role="textbox"][contenteditable="true"]');
+                    var btn = document.getElementById('x3-discord-send');
+                    var native = document.querySelector(
+                      'button[aria-label*="Send Message" i]');
+                    if (!box || native) { if (btn) btn.remove(); return; }
+                    if (!btn) {
+                      btn = document.createElement('button');
+                      btn.id = 'x3-discord-send';
+                      btn.setAttribute('aria-label', 'Send Message');
+                      btn.setAttribute('data-x3-agent-keep', '1');
+                      btn.textContent = '➤';
+                      btn.style.cssText =
+                        'position:fixed;width:26px;height:26px;' +
+                        'border-radius:13px;border:none;cursor:pointer;' +
+                        'background:#5865F2;color:#fff;font-size:13px;' +
+                        'line-height:26px;padding:0;text-align:center;' +
+                        'z-index:2147483630;';
+                      btn.addEventListener('click', function(ev){
+                        ev.preventDefault(); ev.stopPropagation();
+                        var b = document.querySelector(
+                          '[role="textbox"][contenteditable="true"]');
+                        if (b) { b.focus(); sendEnter(b); }
+                      }, true);
+                      document.body.appendChild(btn);
+                    }
+                    // Ride the composer, just past its right edge, so the
+                    // last characters typed stay visible. The composer is
+                    // pinned to the bottom of the pane, so a slow re-pin
+                    // is plenty.
+                    var r = box.getBoundingClientRect();
+                    btn.style.left =
+                      Math.min(window.innerWidth - 28, r.right + 2) + 'px';
+                    btn.style.top =
+                      Math.max(0, r.top + (r.height - 26) / 2) + 'px';
+                  } catch(e){}
+                };
+                setInterval(ensureSend, 1200);
+                ensureSend();
+              }
+
               if (window.__x3PromoSweep) return;
               window.__x3PromoSweep = true;
 
@@ -3277,6 +3454,14 @@ class BrowserWindowView @JvmOverloads constructor(
                 if (navigator.userAgentData){
                   var brands=[{brand:'Chromium',version:'125'},{brand:'Google Chrome',version:'125'},{brand:'Not.A/Brand',version:'24'}];
                   Object.defineProperty(navigator.userAgentData,'brands',{get:function(){return brands;},configurable:true});
+                  // Keep the hints coherent with the UA string: on the
+                  // desktop identity (no "Mobile" token) the engine's
+                  // native mobile=true would contradict it, and a site
+                  // that checks the hint first re-serves the layout the
+                  // desktop UA was chosen to escape.
+                  if (!/Mobile/.test(navigator.userAgent)){
+                    Object.defineProperty(navigator.userAgentData,'mobile',{get:function(){return false;},configurable:true});
+                  }
                 }
               }catch(e){}
               def(Array.prototype,'at',function(i){ i=Math.trunc(i)||0; if(i<0) i+=this.length; return (i<0||i>=this.length)?undefined:this[i]; });

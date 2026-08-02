@@ -198,8 +198,12 @@ class PageAgentController(
                     running = true
                     armWatchdog()
                     showNotice("Agent: ${task.take(48)}")
+                    // Recomputed here, not at task start: the agent hops,
+                    // and the notes must describe the page it is ON.
+                    val notes = SitePlaybooks.notesFor(window.currentUrl)
+                    val handed = if (notes == null) task else "$task\n\n$notes"
                     window.evaluateJavascript(
-                        "window.__x3AgentTask(${JSONObject.quote(task)})"
+                        "window.__x3AgentTask(${JSONObject.quote(handed)})"
                     )
                 }
                 retry -> {
