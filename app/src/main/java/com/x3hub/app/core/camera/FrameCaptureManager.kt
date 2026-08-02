@@ -10,8 +10,11 @@ import android.graphics.YuvImage
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Size
+import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -28,6 +31,24 @@ class FrameCaptureManager(
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var provider: ProcessCameraProvider? = null
     private var lastFrameMs = 0L
+
+    /**
+     * Bound beside the streaming use cases so a still can be taken at any
+     * moment the camera is on; null whenever the device refused the
+     * three-way bind, in which case [captureStill] says so instead of
+     * silently downgrading to a preview frame.
+     */
+    private var stillUseCase: ImageCapture? = null
+
+    /**
+     * Full sensor resolution, JPEG — the same output the system camera
+     * button produces. No target resolution on purpose: MAXIMIZE_QUALITY
+     * with none set picks the largest JPEG size the sensor offers.
+     */
+    private fun buildStill(): ImageCapture = ImageCapture.Builder()
+        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+        .setJpegQuality(STILL_JPEG_QUALITY)
+        .build()
 
     fun start(
         owner: LifecycleOwner,
@@ -77,20 +98,110 @@ class FrameCaptureManager(
                     }
             }
 
-            runCatching {
-                cameraProvider.unbindAll()
-                bindUseCases(cameraProvider, owner, CameraSelector.DEFAULT_BACK_CAMERA, analysis, previewUseCase)
-            }.onFailure {
+            // Still capture rides along whenever the hardware allows the
+            // extra use case; a device that refuses the wider combination
+            // keeps streaming exactly as before, minus stills-while-on.
+            val still = buildStill()
+            val bound = sequenceOf(
+                Triple(CameraSelector.DEFAULT_BACK_CAMERA, still, true),
+                Triple(CameraSelector.DEFAULT_FRONT_CAMERA, still, true),
+                Triple(CameraSelector.DEFAULT_BACK_CAMERA, null, false),
+                Triple(CameraSelector.DEFAULT_FRONT_CAMERA, null, false)
+            ).firstOrNull { (selector, capture, _) ->
                 runCatching {
                     cameraProvider.unbindAll()
-                    bindUseCases(cameraProvider, owner, CameraSelector.DEFAULT_FRONT_CAMERA, analysis, previewUseCase)
-                }
+                    bindUseCases(cameraProvider, owner, selector, analysis, previewUseCase, capture)
+                }.isSuccess
             }
+            stillUseCase = if (bound?.third == true) still else null
+            if (bound == null) Log.w(TAG, "start: no camera accepted the use cases")
         }, ContextCompat.getMainExecutor(context))
     }
 
     fun stop() {
         provider?.unbindAll()
+        stillUseCase = null
+    }
+
+    /**
+     * Take ONE full-resolution photo and hand back its JPEG bytes, or
+     * null when the camera cannot deliver. Two paths to the same shutter:
+     * a camera that is already streaming shoots through the still use
+     * case bound at [start]; a camera that is OFF is opened for just this
+     * frame and released again — the wearer never has to know the
+     * preview exists to take a picture.
+     */
+    fun captureStill(owner: LifecycleOwner, onDone: (ByteArray?) -> Unit) {
+        val boundStill = stillUseCase
+        if (provider != null && boundStill != null) {
+            shoot(boundStill, onDone)
+            return
+        }
+        if (provider != null) {
+            // Streaming, but the hardware refused the three-way bind at
+            // start — rebinding around a live stream is a teardown the
+            // stream may not survive, so be honest instead.
+            Log.w(TAG, "captureStill: streaming without a still use case")
+            onDone(null)
+            return
+        }
+        val future = ProcessCameraProvider.getInstance(context)
+        future.addListener({
+            val oneShotProvider = runCatching { future.get() }.getOrNull()
+            if (oneShotProvider == null) { onDone(null); return@addListener }
+            val capture = buildStill()
+            val ok = runCatching {
+                oneShotProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, capture)
+            }.recoverCatching {
+                oneShotProvider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, capture)
+            }.isSuccess
+            if (!ok) { onDone(null); return@addListener }
+            shoot(capture) { bytes ->
+                // unbind is main-thread-only; the callback is not.
+                ContextCompat.getMainExecutor(context).execute {
+                    runCatching { oneShotProvider.unbind(capture) }
+                }
+                onDone(bytes)
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun shoot(capture: ImageCapture, onDone: (ByteArray?) -> Unit) {
+        capture.takePicture(
+            cameraExecutor,
+            object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    val rotation = image.imageInfo.rotationDegrees
+                    val buffer = image.planes[0].buffer
+                    val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+                    image.close()
+                    // The rotation is BAKED INTO THE PIXELS, at still
+                    // quality. The button photo measures 4032×3024 but
+                    // carries an EXIF rotate tag — every EXIF-honoring
+                    // viewer shows it upright PORTRAIT, which is this
+                    // sensor's true framing. Our pin renderer reads pixels
+                    // and ignores EXIF, so shipping the tag instead of the
+                    // rotation displayed photos lying on their side
+                    // (reported as \"270 degrees rotated\"). Baking it shows
+                    // the same upright picture everywhere the button's own
+                    // output does, at the same 12MP. On a shot this size
+                    // the rotate is a real allocation, so a failure falls
+                    // back to the sideways-but-present frame.
+                    onDone(
+                        if (rotation != 0) {
+                            runCatching {
+                                rotateJpeg(bytes, rotation, STILL_JPEG_QUALITY)
+                            }.getOrDefault(bytes)
+                        } else bytes
+                    )
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    Log.w(TAG, "captureStill failed: ${exception.message}")
+                    onDone(null)
+                }
+            }
+        )
     }
 
     fun shutdown() {
@@ -117,13 +228,17 @@ class FrameCaptureManager(
     }
 
     /** Rotate an encoded JPEG by [degrees] (clockwise) and re-encode. */
-    private fun rotateJpeg(jpeg: ByteArray, degrees: Int): ByteArray {
+    private fun rotateJpeg(
+        jpeg: ByteArray,
+        degrees: Int,
+        quality: Int = JPEG_QUALITY
+    ): ByteArray {
         val src = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return jpeg
         return try {
             val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
             val rotated = Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
             val out = ByteArrayOutputStream()
-            rotated.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+            rotated.compress(Bitmap.CompressFormat.JPEG, quality, out)
             if (rotated !== src) rotated.recycle()
             out.toByteArray()
         } catch (e: Throwable) {
@@ -184,17 +299,22 @@ class FrameCaptureManager(
         owner: LifecycleOwner,
         selector: CameraSelector,
         analysis: ImageAnalysis,
-        preview: Preview?
+        preview: Preview?,
+        still: ImageCapture? = null
     ) {
-        if (preview != null) {
-            cameraProvider.bindToLifecycle(owner, selector, analysis, preview)
-        } else {
-            cameraProvider.bindToLifecycle(owner, selector, analysis)
-        }
+        val useCases = listOfNotNull(analysis, preview, still).toTypedArray()
+        cameraProvider.bindToLifecycle(owner, selector, *useCases)
     }
 
     companion object {
+        private const val TAG = "FrameCapture"
         private const val FRAME_INTERVAL_MS = 1100L
+        // Chosen against a real shutter-button photo from the glasses'
+        // gallery: same 4032×3024 JPEG, and 95 lands in the same
+        // bytes-per-pixel family as the system camera's own encode. The
+        // HAL's noise/sharpening pipeline differs slightly, so exact byte
+        // parity is not a thing an app can promise.
+        private const val STILL_JPEG_QUALITY = 95
         // Bumped 62 → 88 so save_photo writes look like real photos
         // (sharp text, recognizable detail) instead of low-bitrate
         // streaming preview frames. The wire cost for Gemini Live

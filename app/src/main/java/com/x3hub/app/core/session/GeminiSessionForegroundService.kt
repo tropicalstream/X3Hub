@@ -74,6 +74,14 @@ class GeminiSessionForegroundService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
+        // The voice tools' shutter: runs on the main thread because
+        // CameraX binding demands it, against THIS service's lifecycle —
+        // the same owner the streaming use cases ride.
+        com.x3hub.app.core.camera.StillCameraBridge.capturer = { onDone ->
+            androidx.core.content.ContextCompat.getMainExecutor(this).execute {
+                frameCapture.captureStill(this, onDone)
+            }
+        }
         // Bridge the shared ChatSessionModel.messages flow into
         // ChatCardBridge so the HUD chat card renders the live chat.
         lifecycleScope.launch {
@@ -111,6 +119,7 @@ class GeminiSessionForegroundService : LifecycleService() {
 
     override fun onDestroy() {
         Log.d(TAG, "onDestroy")
+        com.x3hub.app.core.camera.StillCameraBridge.capturer = null
         // Stop CameraX before the pipeline so the analyzer doesn't push
         // a frame into a closed WebSocket.
         if (cameraOn) {

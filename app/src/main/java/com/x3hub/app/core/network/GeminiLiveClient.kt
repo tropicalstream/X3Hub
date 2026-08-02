@@ -60,7 +60,9 @@ class GeminiLiveClient(
                 "aloud and shown on a small heads-up card, so keep them short and information-dense.\n" +
                 "- Vision: when camera frames are streaming, use them to answer 'look at this' / " +
                 "'what does this say' / 'describe this' style questions about the real world.\n" +
-                "- camera_action: save a photo of what the camera sees (action=save_photo).\n" +
+                "- camera_action: take_photo takes a NEW full-resolution picture and pins it " +
+                "to the HUD (camera preview not required); save_photo saves the currently " +
+                "streaming frame (preview required).\n" +
                 "- hud_pin: manage the HUD pin board — post-it notes, pictures, and live " +
                 "auto-refreshing info cards placed on the display. Pin ONLY when asked to " +
                 "pin/watch/keep something there. Answering a question NEVER requires a pin: " +
@@ -765,16 +767,20 @@ class GeminiLiveClient(
         tools.put(JSONObject()
             .put("name", "camera_action")
             .put("description",
-                "Save a photo of what the glasses camera currently sees. Use when the user " +
-                    "says 'take a picture', 'save a photo', 'capture this'. The camera must " +
-                    "be streaming; if it isn't, tell the user to double-tap the left temple arm.")
+                "The glasses camera. action='take_photo': take a NEW full-resolution " +
+                    "picture, pin it to the HUD board and save it to the gallery — works " +
+                    "whether or not the camera preview is on. Use for 'take a picture', " +
+                    "'take a photo', 'snap this', 'photograph that'. " +
+                    "action='save_photo': save the frame the camera is CURRENTLY streaming " +
+                    "into this conversation — only for 'save what you're seeing' while the " +
+                    "preview is on; it needs the stream (double-tap the left temple arm).")
             .put("parameters", JSONObject()
                 .put("type", "OBJECT")
                 .put("properties", JSONObject()
                     .put("action", JSONObject().put("type", "STRING")
-                        .put("description", "Action: save_photo."))
+                        .put("description", "Action: take_photo or save_photo."))
                     .put("title", JSONObject().put("type", "STRING")
-                        .put("description", "Optional title or label for the saved photo.")))
+                        .put("description", "Optional title or label for the photo.")))
                 .put("required", JSONArray().put("action"))))
 
         tools.put(JSONObject()
