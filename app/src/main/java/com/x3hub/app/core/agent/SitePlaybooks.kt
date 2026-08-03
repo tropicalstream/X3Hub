@@ -30,9 +30,18 @@ object SitePlaybooks {
             .getOrNull().orEmpty().lowercase(Locale.US)
         return when {
             host == "discord.com" || host.endsWith(".discord.com") -> DISCORD
+            host == "youtube.com" || host.endsWith(".youtube.com") ||
+                host == "youtu.be" -> YOUTUBE
             else -> null
         }
     }
+
+    private val YOUTUBE = """
+        Site notes for YouTube:
+        - A watch or Shorts page AUTOPLAYS once it loads. NEVER click or tap the video itself to 'make sure' it plays — the video surface is a play/pause TOGGLE, and tapping a playing video pauses it. Watched live: the 'ensure it plays' tap was the only reason a video stopped.
+        - If a video is genuinely not playing, the only safe control is an explicit play BUTTON (label 'Play'); when none is shown, the video is already playing and the task is done.
+        - Prefer opening a normal watch page over a Shorts page when both match the request.
+    """.trimIndent()
 
     private val DISCORD = """
         Site notes for Discord (verified on this device):

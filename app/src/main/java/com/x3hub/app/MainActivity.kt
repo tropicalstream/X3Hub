@@ -604,6 +604,13 @@ class MainActivity : AppCompatActivity() {
      * replaced.
      */
     private fun dispatchErrandTask(task: String, target: BrowserWindowView) {
+        // Decided HERE because only the dispatch still knows the task's
+        // words: a PLAY errand earns the paused-video repair at agent-done;
+        // a task that says pause, stop or mute must never have its result
+        // "repaired" back into playback.
+        target.expectPlaybackRepair =
+            task.contains(Regex("\\b(play|watch|listen)", RegexOption.IGNORE_CASE)) &&
+                !task.contains(Regex("\\b(pause|stop|mute)", RegexOption.IGNORE_CASE))
         val outcome = dispatchPageCommand(task, target)
         val agentWillReport =
             outcome is PageCommands.Outcome.ForAgent ||
@@ -1192,6 +1199,22 @@ class MainActivity : AppCompatActivity() {
                     // that.
                     setErrandBusy(false)
                     Log.i(TAG, "agent ${if (ok) "done" else "failed"}: ${message.take(160)}")
+                    // Trust, then verify: watched live in dim, the agent's
+                    // final 'ensure it plays' tap PAUSED the Short it had
+                    // just started, it announced 'Playing…' anyway, and the
+                    // wearer got two seconds of audio and then silence with
+                    // nothing on screen to explain it. The claim costs one
+                    // evaluate to check natively and one play() to repair —
+                    // delayed a beat so the agent's last click settles.
+                    val repair = ok && window.expectPlaybackRepair
+                    window.expectPlaybackRepair = false
+                    if (repair) {
+                        uiHandler.postDelayed({
+                            if (hudPinBoardController?.browserWindows()
+                                    ?.any { it === window } == true
+                            ) window.resumePausedVideo()
+                        }, VIDEO_RESUME_SETTLE_MS)
+                    }
                     false
                 }
             )
@@ -3560,6 +3583,13 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "X3HubMain"
+
+        /**
+         * Between agent-done and the paused-video check: long enough for
+         * the agent's final click to finish toggling whatever it toggled,
+         * short enough that the wearer never notices the gap.
+         */
+        private const val VIDEO_RESUME_SETTLE_MS = 600L
 
         /**
          * What a double-tap asks for when no spoken task was given. Phrased

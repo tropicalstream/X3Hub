@@ -196,6 +196,14 @@ class BrowserWindowView @JvmOverloads constructor(
     var onExitRequested: (() -> Unit)? = null
 
     /**
+     * Set at errand dispatch when the task's own words ask for playback;
+     * consumed at agent-done to run [resumePausedVideo]. Lives on the
+     * window because by the time the agent reports, nobody else remembers
+     * what the task said.
+     */
+    @Volatile var expectPlaybackRepair: Boolean = false
+
+    /**
      * Fired after a [resizeStep] with the new logical px size. This view
      * updates its OWN layoutParams, which is right when it is a direct
      * child of the pin board; a host that wraps it in a pin container has
@@ -947,6 +955,30 @@ class BrowserWindowView @JvmOverloads constructor(
 
     fun debugEval(js: String) {
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
+    }
+
+    /**
+     * Press play on a video someone left paused — with a receipt.
+     *
+     * Exists for the moment an agent run ends: its own "make sure it
+     * plays" tap PAUSES an already-playing player (on Shorts the whole
+     * surface is the toggle), and the run then reports success and
+     * leaves. One evaluate reads the truth and repairs it; ended and
+     * missing videos are left alone.
+     */
+    fun resumePausedVideo() {
+        webView.evaluateJavascript(
+            """
+            (function(){
+              var v = document.querySelector('video');
+              if (!v) return 'no-video';
+              if (v.ended) return 'ended';
+              if (!v.paused) return 'playing t=' + Math.round(v.currentTime);
+              v.play();
+              return 'resumed t=' + Math.round(v.currentTime);
+            })()
+            """.trimIndent()
+        ) { Log.i(TAG, "resumePausedVideo -> $it") }
     }
 
     // ── Page-agent host API ───────────────────────────────────────────
