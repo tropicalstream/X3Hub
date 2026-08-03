@@ -278,14 +278,31 @@ class BrowserWindowView @JvmOverloads constructor(
                 var s = getComputedStyle(el);
                 return /auto|scroll/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 4;
               }
+              // Measured the way the cursor's picker measures — the VISIBLE
+              // intersection with the viewport, not the raw rect. An
+              // off-canvas drawer (position:fixed, left:-320px, full height)
+              // is the biggest scrollable box on plenty of app-shell pages
+              // while being entirely off screen; scored by its raw rect it
+              // wins the sweep, and "scroll down" then drives a closed menu
+              // nobody can see while the host still says "At the bottom".
+              // html and body are skipped for the same reason pick() skips
+              // them: they ARE the document, which the docH test below has
+              // already ruled out, and their client box is the containing
+              // block rather than what is on screen.
+              var vw = Math.max(innerWidth, document.documentElement.clientWidth);
+              var vh = Math.max(innerHeight, document.documentElement.clientHeight);
               var best = null, bestArea = 0, bestH = 0;
               var all = document.querySelectorAll('*');
               for (var i = 0; i < all.length && i < 4000; i++){
                 var e = all[i];
+                if (e === document.documentElement || e === document.body) continue;
                 if (!scrollable(e)) continue;
                 var r = e.getBoundingClientRect();
-                var a = r.width * r.height;
-                if (a > bestArea){ bestArea = a; bestH = r.height; best = e; }
+                var visW = Math.min(r.right, vw) - Math.max(r.left, 0);
+                var visH = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+                if (visW <= 0 || visH <= 0) continue;
+                var a = visW * visH;
+                if (a > bestArea){ bestArea = a; bestH = visH; best = e; }
               }
               var docH = document.documentElement.scrollHeight;
               // Same floor as the cursor's edge-scroll picker, for the same
@@ -293,9 +310,9 @@ class BrowserWindowView @JvmOverloads constructor(
               // scroll, so the pane found here is the page's only scroller
               // and a 40% bar simply meant "nothing scrolls" on layouts like
               // YouTube's watch page. 15% of the viewport plus 80 CSS px of
-              // height still keeps decorations out.
+              // visible height still keeps decorations out.
               if (best && docH <= innerHeight + 4 &&
-                  bestArea > (innerWidth * innerHeight * 0.15) && bestH >= 80) {
+                  bestArea > (vw * vh * 0.15) && bestH >= 80) {
                 best.scrollBy(0, dy);
               } else { window.scrollBy(0, dy); }
             })($dy);
