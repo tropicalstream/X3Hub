@@ -278,19 +278,26 @@ class BrowserWindowView @JvmOverloads constructor(
                 var s = getComputedStyle(el);
                 return /auto|scroll/.test(s.overflowY) && el.scrollHeight > el.clientHeight + 4;
               }
-              var best = null, bestArea = 0;
+              var best = null, bestArea = 0, bestH = 0;
               var all = document.querySelectorAll('*');
               for (var i = 0; i < all.length && i < 4000; i++){
                 var e = all[i];
                 if (!scrollable(e)) continue;
                 var r = e.getBoundingClientRect();
                 var a = r.width * r.height;
-                if (a > bestArea){ bestArea = a; best = e; }
+                if (a > bestArea){ bestArea = a; bestH = r.height; best = e; }
               }
               var docH = document.documentElement.scrollHeight;
-              if (best && bestArea > (innerWidth * innerHeight * 0.4) &&
-                  docH <= innerHeight + 4) { best.scrollBy(0, dy); }
-              else { window.scrollBy(0, dy); }
+              // Same floor as the cursor's edge-scroll picker, for the same
+              // reason: this branch is only taken when the DOCUMENT cannot
+              // scroll, so the pane found here is the page's only scroller
+              // and a 40% bar simply meant "nothing scrolls" on layouts like
+              // YouTube's watch page. 15% of the viewport plus 80 CSS px of
+              // height still keeps decorations out.
+              if (best && docH <= innerHeight + 4 &&
+                  bestArea > (innerWidth * innerHeight * 0.15) && bestH >= 80) {
+                best.scrollBy(0, dy);
+              } else { window.scrollBy(0, dy); }
             })($dy);
             """.trimIndent(),
             null
@@ -2759,7 +2766,22 @@ class BrowserWindowView @JvmOverloads constructor(
                   // hang in sidebars. Vertical keeps the area rule, where a
                   // content pane genuinely is the biggest box on the page.
                   if (horiz && bestScore < vw * 0.5) return null;
-                  if (!horiz && bestScore < vw * vh * 0.40) return null;
+                  // Vertical. The 40%-of-the-viewport bar this used to set
+                  // was written as if a big content pane were competing with
+                  // little widgets — but docCan has ALREADY returned window
+                  // when the document can move, so anything reaching here is
+                  // the page's only scroller. Measured on YouTube's watch
+                  // page: body is position:fixed, the description panel is
+                  // 121px tall in a 426px viewport holding 819px of text —
+                  // 28% of the area, rejected, and the wearer got a sliver
+                  // of the description they opened and no way to scroll it.
+                  // A floor still rejects decorations: 15% of the viewport
+                  // AND 80 CSS px of visible height.
+                  if (!horiz){
+                    var rb = best.getBoundingClientRect();
+                    var hb = Math.min(rb.bottom, vh) - Math.max(rb.top, 0);
+                    if (bestScore < vw * vh * 0.15 || hb < 80) return null;
+                  }
                   return best;
                 } catch (err) { return null; }
               }
