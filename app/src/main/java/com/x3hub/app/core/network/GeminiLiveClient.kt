@@ -89,7 +89,12 @@ class GeminiLiveClient(
                 "completely (it may use search, reminders, pins). Great for a morning report.\n" +
                 "- page_agent: hand an errand to the agent inside an already-open window " +
                 "('play the first result', 'search that page for X', 'press play'). " +
-                "Open a window first if there is none.\n" +
+                "Open a window first if there is none. ASKING ABOUT A YOUTUBE VIDEO — " +
+                "'summarize this video', 'what's this about', 'what did they say about X', " +
+                "'what caused it' — goes HERE, not to your own knowledge and not to " +
+                "read_page: YouTube's own AI has watched the video, and the agent knows how " +
+                "to work it. Pass the wearer's question in their own words, and relay the " +
+                "answer the agent brings back.\n" +
                 "YOU ARE THE ORCHESTRATOR — the user speaks only to you, hands free, and " +
                 "you run their whole errand end to end by CHAINING tools. Chain in the " +
                 "SAME turn: when a tool result arrives and the errand has steps left, " +

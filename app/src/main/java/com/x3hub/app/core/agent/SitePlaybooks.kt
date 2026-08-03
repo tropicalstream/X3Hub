@@ -41,6 +41,16 @@ object SitePlaybooks {
         - A watch or Shorts page AUTOPLAYS once it loads. NEVER click or tap the video itself to 'make sure' it plays — the video surface is a play/pause TOGGLE, and tapping a playing video pauses it. Watched live: the 'ensure it plays' tap was the only reason a video stopped.
         - If a video is genuinely not playing, the only safe control is an explicit play BUTTON (label 'Play'); when none is shown, the video is already playing and the task is done.
         - Prefer opening a normal watch page over a Shorts page when both match the request.
+
+        ASKING ABOUT THE VIDEO (summaries and questions), verified on this device:
+        YouTube has its own AI that has actually watched the video. Use it for ANY request about what a video says, means, covers or recommends — 'summarize this', 'what's this about', 'what did they say about X', 'is it worth watching', 'what caused it'. It is grounded in the video, so prefer it over reading the description or guessing from the title.
+        The flow, by LABEL — never by position:
+        1. The entry is a button labeled 'Ask questions' (sometimes shown as 'Ask'), under the video with the title and description. Clicking the video's own description/'more' area first also reveals it. Clicking it opens a panel headed 'Ask about this video'.
+        2. The panel offers ready-made suggestions — 'Summarize the video', 'Recommend related content', and a few specific to that video. If one matches the request, CLICK IT: it is one click and it cannot be misspelled.
+        3. For anything else, type the wearer's question in the wearer's own words into the textarea placeheld 'Ask a question...' and submit it. Keep their phrasing; do not translate it into keywords.
+        4. The answer streams in as chat text under the question, and takes a few seconds. WAIT for it to stop growing before reading it.
+        5. Then REPORT THE ANSWER as your result — it is spoken aloud to the wearer, who cannot read a small panel while walking. Give the substance in three or four plain sentences, in your own words, and never claim to have summarized something whose answer you did not actually read.
+        If the video has no 'Ask questions' button, say so and fall back to reading the visible title and description; do not invent a summary.
     """.trimIndent()
 
     private val DISCORD = """
