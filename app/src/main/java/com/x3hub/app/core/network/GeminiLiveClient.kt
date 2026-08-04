@@ -94,7 +94,14 @@ class GeminiLiveClient(
                 "'what caused it' — goes HERE, not to your own knowledge and not to " +
                 "read_page: YouTube's own AI has watched the video, and the agent knows how " +
                 "to work it. Pass the wearer's question in their own words, and relay the " +
-                "answer the agent brings back.\n" +
+                "answer the agent brings back. " +
+                "'ASK YOUTUBE ...' IS THE WEARER SAYING IT OUTRIGHT — 'ask YouTube to " +
+                "summarize the video', 'ask YouTube how many acres burned', 'ask the video " +
+                "who she is talking about'. Always page_agent, never your own answer even " +
+                "when you think you know. Hand over ONLY the question itself: 'ask YouTube " +
+                "how many acres burned' becomes the task 'how many acres burned' — the " +
+                "words 'ask YouTube' are the wearer routing you, not part of what they " +
+                "want asked. If no video window is open, say so instead of guessing.\n" +
                 "YOU ARE THE ORCHESTRATOR — the user speaks only to you, hands free, and " +
                 "you run their whole errand end to end by CHAINING tools. Chain in the " +
                 "SAME turn: when a tool result arrives and the errand has steps left, " +

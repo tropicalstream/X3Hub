@@ -834,6 +834,7 @@ class BrowserWindowView @JvmOverloads constructor(
      */
     fun installInputBridge() {
         webView.addJavascriptInterface(InputBridge(), PageInputBridge.NAME)
+        webView.addJavascriptInterface(AskBridge(), ASK_BRIDGE)
     }
 
     private inner class InputBridge {
@@ -979,6 +980,153 @@ class BrowserWindowView @JvmOverloads constructor(
 
     fun debugEval(js: String) {
         webView.evaluateJavascript(js) { Log.i(TAG, "eval -> $it") }
+    }
+
+    /**
+     * Ask YouTube's own video AI a question, natively, and hand back what
+     * it answers.
+     *
+     * The LLM agent can drive this panel and mostly does — but "mostly" is
+     * the problem: measured across four live runs it clicked the entry
+     * toggle shut again, substituted a 'Summarize' chip for a specific
+     * question, and re-pressed Ask on an emptied box. Each failure looked
+     * like an answer. The sequence is fully deterministic — open, wait for
+     * the box, type, submit once, poll until the reply stops growing — so
+     * it belongs in code, where it either works or says it did not.
+     *
+     * [onAnswer] gets the answer text, or null when the panel never
+     * appeared or nothing came back inside the budget.
+     */
+    fun askYouTube(question: String, onAnswer: (String?) -> Unit) {
+        val q = org.json.JSONObject.quote(question)
+        webView.evaluateJavascript(
+            """
+            (function(){
+              if (window.__x3AskBusy) return 'busy';
+              window.__x3AskBusy = true;
+              var QUESTION = $q;
+              function txt(e){ return ((e && e.textContent) || '').trim(); }
+              // Each field on its OWN. Concatenating label and text was the
+              // first cut and it matched nothing: this button carries the
+              // same words in both, so the joined string reads "Ask
+              // questions Ask questions" and no anchored pattern fits it.
+              function isAsk(s){ return /^\s*ask(\s+questions?)?\s*${'$'}/i.test((s || '').trim()); }
+              function findEntry(){
+                var all = document.querySelectorAll('button,[role="button"]');
+                for (var i = 0; i < all.length; i++){
+                  if (isAsk(all[i].getAttribute('aria-label')) || isAsk(txt(all[i]))) return all[i];
+                }
+                return null;
+              }
+              function box(){ return document.querySelector('textarea'); }
+              // The reply, by SHAPE rather than by element name. YouTube's
+              // chat items are custom elements whose tags are neither
+              // guessable nor stable — the answer arrived in
+              // <you-chat-item-view-model>, which no reasonable selector
+              // would have predicted. So: take every chat-ish node, drop
+              // our own question, the greeting, the suggestion chips and
+              // the disclaimer, and keep the longest thing left.
+              function answer(){
+                var nodes = document.querySelectorAll(
+                  '[class*="chat"],[class*="conversation"],' +
+                  'you-chat-item-view-model,yt-chat-item-view-model');
+                // Anchor on OUR question and take what follows it. Picking
+                // by size instead was the first cut and it returned the
+                // suggestion chips ("What caused the...?What is a red
+                // flag?..."), which are prose-length and sit above the
+                // reply. Document order is the one thing a chat cannot
+                // get wrong: the answer comes after the question.
+                var mine = null;
+                var turns = document.querySelectorAll('yt-chat-user-turn-view-model');
+                for (var k = turns.length - 1; k >= 0; k--){
+                  if (txt(turns[k]).indexOf(QUESTION) === 0){ mine = turns[k]; break; }
+                }
+                if (!mine) return '';
+                for (var i = 0; i < nodes.length; i++){
+                  var n = nodes[i], t = txt(n);
+                  if (!t || t.length < 40) continue;
+                  var after = mine.compareDocumentPosition(n) &
+                    Node.DOCUMENT_POSITION_FOLLOWING;
+                  if (!after) continue;
+                  if (t.indexOf(QUESTION) > -1) continue;
+                  if (/^AI can make mistakes/i.test(t)) continue;
+                  // Chips render as run-together questions with no spacing
+                  // after the '?'; real prose does not.
+                  if (/\?[A-Z]/.test(t)) continue;
+                  if (n.querySelector && n.querySelector('you-chat-chips-data')) continue;
+                  return t;
+                }
+                return '';
+              }
+              function done(v){ window.__x3AskBusy = false; $ASK_BRIDGE.onAskResult(v || ''); }
+              var entry = findEntry();
+              if (!box() && entry) entry.click();
+              var waited = 0;
+              // Panel first. It renders lazily, so poll rather than assume.
+              var openTimer = setInterval(function(){
+                waited += 300;
+                var b = box();
+                if (b){
+                  clearInterval(openTimer);
+                  b.focus();
+                  var setter = Object.getOwnPropertyDescriptor(
+                    Object.getPrototypeOf(b), 'value');
+                  if (setter && setter.set) setter.set.call(b, QUESTION);
+                  else b.value = QUESTION;
+                  b.dispatchEvent(new Event('input', {bubbles:true}));
+                  b.dispatchEvent(new Event('change', {bubbles:true}));
+                  setTimeout(function(){
+                    // Submit exactly once: Enter, then a send control only
+                    // if the box did not clear on its own.
+                    ['keydown','keypress','keyup'].forEach(function(t){
+                      b.dispatchEvent(new KeyboardEvent(t, {key:'Enter',code:'Enter',
+                        keyCode:13, which:13, bubbles:true, cancelable:true}));
+                    });
+                    if ((b.value || '').trim() === QUESTION.trim()){
+                      var all = document.querySelectorAll('button,[role="button"],span');
+                      for (var i = 0; i < all.length; i++){
+                        var s = (all[i].getAttribute('aria-label') || '') + ' ' + txt(all[i]);
+                        if (/^\s*(Ask|Send)\s*${'$'}/i.test(s.trim())){ all[i].click(); break; }
+                      }
+                    }
+                    // Then simply watch. Settled = same text twice running,
+                    // which is what "it stopped streaming" actually means.
+                    var last = '', stable = 0, spent = 0;
+                    var poll = setInterval(function(){
+                      spent += 700;
+                      var a = answer();
+                      if (a && a === last) stable++; else stable = 0;
+                      last = a;
+                      if ((a && stable >= 3) || spent > 30000){
+                        clearInterval(poll);
+                        done(a);
+                      }
+                    }, 700);
+                  }, 400);
+                } else if (waited > 8000){
+                  clearInterval(openTimer);
+                  done('');
+                }
+              }, 300);
+              return 'started';
+            })()
+            """.trimIndent()
+        ) { Log.i(TAG, "askYouTube start -> $it") }
+        askAnswerListener = onAnswer
+    }
+
+    /** Set for the duration of one [askYouTube]; cleared when it answers. */
+    private var askAnswerListener: ((String?) -> Unit)? = null
+
+    private inner class AskBridge {
+        @android.webkit.JavascriptInterface
+        fun onAskResult(text: String) {
+            post {
+                val l = askAnswerListener
+                askAnswerListener = null
+                l?.invoke(text.takeIf { it.isNotBlank() })
+            }
+        }
     }
 
     /**
@@ -2963,6 +3111,9 @@ class BrowserWindowView @JvmOverloads constructor(
         const val BASE_STEP = 1
 
         /** Narrow-phone width every responsive site is built for. */
+        /** JS-side name of the ask-YouTube result channel. */
+        private const val ASK_BRIDGE = "X3Ask"
+
         private const val MOBILE_LAYOUT_CSS_WIDTH = 320
 
         /**

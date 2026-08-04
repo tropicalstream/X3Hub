@@ -51,6 +51,7 @@ import com.x3hub.app.core.tools.BrowserTool
 import com.x3hub.app.core.tools.PageVision
 import com.x3hub.app.ui.BrowserWindowView
 import com.x3hub.app.ui.CustomKeyboardView
+import com.x3hub.app.ui.AssistantState
 import com.x3hub.app.ui.DimController
 import com.x3hub.app.ui.DimActivityStatus
 import com.x3hub.app.ui.DimTapSequence
@@ -603,7 +604,61 @@ class MainActivity : AppCompatActivity() {
      * skipping it left the orchestrated path dumber than the double-tap it
      * replaced.
      */
+    /**
+     * "ask youtube how many acres burned" — the wearer's own phrasing for
+     * YouTube's built-in video AI, answered natively.
+     *
+     * Returns the bare question when this task is one of those, null when
+     * it is not. The routing words are stripped: they aim the request, and
+     * typing them into the box would ask YouTube about itself.
+     */
+    private fun youTubeAskQuestion(task: String, target: BrowserWindowView): String? {
+        val host = runCatching { android.net.Uri.parse(target.currentUrl.orEmpty()).host }
+            .getOrNull().orEmpty().lowercase()
+        if (!(host.endsWith("youtube.com") || host == "youtu.be")) return null
+        // The classification itself lives in AskRouting, where it has a
+        // test: written inline it hid an empty regex alternative that
+        // matched everything, and the only symptom was a feature that
+        // quietly never ran.
+        return com.x3hub.app.core.agent.AskRouting.question(task)
+    }
+
     private fun dispatchErrandTask(task: String, target: BrowserWindowView) {
+        // Native before the agent: this exact sequence — open the panel,
+        // type once, submit once, wait out the stream — was driven by the
+        // LLM agent across four live runs and failed four different ways,
+        // each one looking like an answer. Deterministic work belongs in
+        // code; the agent keeps everything that needs judgement.
+        youTubeAskQuestion(task, target)?.let { question ->
+            Log.i(TAG, "native ask-YouTube: '${question.take(60)}'")
+            setErrandBusy(true)
+            // The whole flow lives in page timers, and a paused renderer
+            // runs none of them. Under an open microphone the window is
+            // paused by design (see documentReadyForPause) — which in dim
+            // mode left the ⚙ glyph lit on a black display forever, the
+            // ask frozen mid-poll. agentDriving is the existing exemption
+            // for exactly this; the native path needs it as much as the
+            // LLM agent does.
+            target.agentDriving = true
+            var settled = false
+            fun finish(answer: String?) {
+                if (settled) return
+                settled = true
+                target.agentDriving = false
+                setErrandBusy(false)
+                val say = answer?.takeIf { it.isNotBlank() }
+                    ?: "YouTube didn't answer that one."
+                showNotice(say.take(90))
+                AgentSpeech.speak(applicationContext, say.take(600))
+                Log.i(TAG, "native ask-YouTube -> ${answer?.take(120) ?: "(none)"}")
+            }
+            // A page that never answers must not strand the glyph: the JS
+            // has its own budget, but a renderer killed mid-flight cannot
+            // report anything at all.
+            uiHandler.postDelayed({ finish(null) }, ASK_YOUTUBE_TIMEOUT_MS)
+            target.askYouTube(question) { answer -> finish(answer) }
+            return
+        }
         // Decided HERE because only the dispatch still knows the task's
         // words: a PLAY errand earns the paused-video repair at agent-done;
         // a task that says pause, stop or mute must never have its result
@@ -1884,6 +1939,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * The same facts the HUD glyphs report, as [AssistantState] bits for
+     * the dim readout's figure. Kept beside [activityGlyphs] so the strip
+     * and the assistant can never disagree about what is happening.
+     */
+    private fun assistantState(): Int {
+        val phase = HudStateBridge.current().phase
+        // TALKING is not its own phase — the pipeline stays in
+        // THINKING/FOLLOW_UP while it streams model audio. Ask the PLAYER,
+        // which knows whether audio is still leaving the speaker. A level
+        // test would be wrong twice over: the oscilloscope level is stamped
+        // when audio ARRIVES from the network, which runs ahead of the
+        // voice, and being a level it dips between words, so "is she
+        // speaking" would flicker several times a sentence.
+        val talking = com.x3hub.app.core.audio.GeminiAudioPlayer.isSpeaking()
+        return AssistantState.of(
+            listening = phase == HudStateBridge.VoicePhase.LISTENING ||
+                phase == HudStateBridge.VoicePhase.FOLLOW_UP,
+            thinking = phase == HudStateBridge.VoicePhase.THINKING && !talking,
+            talking = talking,
+            agentBusy = AgentActivityBridge.busy || errandBusy ||
+                com.x3hub.app.core.bridge.PhotoCaptureBridge.busy,
+            agentSpeaking = com.x3hub.app.core.agent.AgentSpeech.speaking,
+            camera = com.x3hub.app.core.bridge.CameraStateBridge.current(),
+            muted = isSystemMediaMuted()
+        )
+    }
+
+    /**
      * Compact system state beside the battery:
      * ✦ while a Gemini session is live, ⚙ while the page agent works. Both
      * can be true at once — an orchestrated errand is exactly that. M means
@@ -2270,7 +2353,7 @@ class MainActivity : AppCompatActivity() {
         // cursor is pointless, so it is parked.
         dimController = DimController(
             root,
-            statusGlyphs = { activityGlyphs() }
+            assistantState = { assistantState() }
         ) { dimmed ->
             // A tap sequence belongs wholly to the mode in which it began.
             // Never let a pending dim single/double land on the visible HUD,
@@ -2302,6 +2385,12 @@ class MainActivity : AppCompatActivity() {
                 renderActivityGlyphs()
                 dimController?.refreshReadout()
             }
+        }
+        // The agent's voice lights the keyboard she types at, so the readout
+        // must hear about it — the flag flips on an audio thread, hence the
+        // hop to main before touching any view.
+        com.x3hub.app.core.agent.AgentSpeech.onSpeakingChanged = {
+            uiHandler.post { dimController?.refreshReadout() }
         }
         com.x3hub.app.core.bridge.PhotoCaptureBridge.setListener {
             uiHandler.post {
@@ -3590,6 +3679,13 @@ class MainActivity : AppCompatActivity() {
          * short enough that the wearer never notices the gap.
          */
         private const val VIDEO_RESUME_SETTLE_MS = 600L
+
+        /**
+         * Outer bound on a native ask-YouTube. Comfortably past the JS's
+         * own 8s-to-open plus 30s-to-answer budget, so this only fires
+         * when the page could not report at all.
+         */
+        private const val ASK_YOUTUBE_TIMEOUT_MS = 45_000L
 
         /**
          * What a double-tap asks for when no spoken task was given. Phrased
