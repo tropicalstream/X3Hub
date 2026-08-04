@@ -64,7 +64,116 @@ object AgentSpeech {
             .build()
     }
 
+    /**
+     * True while the agent's own voice is actually sounding.
+     *
+     * The readout draws her at a keyboard while the agent works, and lights
+     * the keys while it SPEAKS its result — so this has to mean audio is
+     * leaving the speaker, not merely that speak() was called. There is a
+     * real gap between the two: the Gemini voice is synthesised over the
+     * network first, which is seconds of silence during which lit keys
+     * would be a lie.
+     */
+    @Volatile
+    var speaking: Boolean = false
+        private set
+
+    /**
+     * Loudness of what is sounding RIGHT NOW, 0..1 — or [LEVEL_UNKNOWN]
+     * when the voice cannot report it.
+     *
+     * Measured at the playback head, not at the write cursor: writes run
+     * far ahead of the speaker (the whole clip is copied into the track in
+     * a few milliseconds), so amplitude taken where we WRITE would lead
+     * the audio by the length of the buffer and the keyboard would flash
+     * to syllables the wearer has not heard yet. The drain loop already
+     * polls playbackHeadPosition to know when the answer ends; sampling
+     * the PCM around that frame is what makes the flashing actually
+     * synchronous with the voice.
+     */
+    @Volatile
+    var speechLevel: Float = 0f
+        private set
+
+    /** The device voice hands back no samples, so there is nothing to measure. */
+    const val LEVEL_UNKNOWN = -1f
+
+    /** Fired whenever [speaking] flips, so a HUD can repaint. */
+    @Volatile
+    var onSpeakingChanged: ((Boolean) -> Unit)? = null
+
+    private fun requestSpeechFocus() {
+        val am = appCtx?.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+            ?: return
+        val attrs = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+        val req = android.media.AudioFocusRequest.Builder(
+            android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+        ).setAudioAttributes(attrs).build()
+        audioFocusRequest = req
+        val res = runCatching { am.requestAudioFocus(req) }.getOrDefault(
+            android.media.AudioManager.AUDIOFOCUS_REQUEST_FAILED
+        )
+        Log.i(TAG, "speech focus request -> $res")
+    }
+
+    private fun abandonSpeechFocus() {
+        val am = appCtx?.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+        val req = audioFocusRequest
+        audioFocusRequest = null
+        if (am != null && req != null) {
+            runCatching { am.abandonAudioFocusRequest(req) }
+        }
+    }
+
+    private fun setSpeaking(value: Boolean) {
+        if (!value) speechLevel = 0f
+        if (speaking == value) return
+        speaking = value
+        runCatching { onSpeakingChanged?.invoke(value) }
+    }
+
+    /**
+     * RMS of a short window of PCM centred on the frame now leaving the
+     * speaker. Strided rather than exhaustive — this runs every 40ms on a
+     * playback thread and a tenth of the samples describes a syllable's
+     * envelope just as well as all of them.
+     */
+    private fun levelAt(wav: ByteArray, frame: Int): Float {
+        val windowFrames = SAMPLE_RATE / 25          // 40ms
+        val startFrame = (frame - windowFrames / 2).coerceAtLeast(0)
+        var i = startFrame * BYTES_PER_FRAME
+        val end = minOf(i + windowFrames * BYTES_PER_FRAME, wav.size - 1)
+        if (i >= end) return 0f
+        var sum = 0.0
+        var n = 0
+        val stride = BYTES_PER_FRAME * 8
+        while (i < end - 1) {
+            val sample = ((wav[i + 1].toInt() shl 8) or (wav[i].toInt() and 0xFF)).toShort().toInt()
+            sum += sample.toDouble() * sample
+            n++
+            i += stride
+        }
+        if (n == 0) return 0f
+        val rms = kotlin.math.sqrt(sum / n) / 32768.0
+        // Speech RMS rarely passes ~0.25 even when loud, so scale it into a
+        // usable range instead of leaving the keyboard permanently dim.
+        return (rms * 4.0).coerceIn(0.0, 1.0).toFloat()
+    }
+
     @Volatile private var track: AudioTrack? = null
+
+    /**
+     * The application context, captured on [speak] so the streamed-audio
+     * path can reach the AudioManager. play() runs on its own thread with
+     * no context of its own, and this is a process singleton, so a volatile
+     * field is the honest way to hand it over.
+     */
+    @Volatile private var appCtx: Context? = null
+
+    @Volatile private var audioFocusRequest: android.media.AudioFocusRequest? = null
     /** Bumped on every new utterance so a late one cannot talk over a newer. */
     @Volatile private var generation = 0
 
@@ -80,12 +189,16 @@ object AgentSpeech {
         runCatching { track?.flush() }
         track = null
         runCatching { deviceTts?.stop() }
+        abandonSpeechFocus()
+        // Whatever was sounding is not sounding now.
+        setSpeaking(false)
     }
 
     fun speak(context: Context, text: String) {
         val clipped = clean(text)
         Log.i(TAG, "speak() asked for ${clipped.length} chars")
         if (clipped.isEmpty()) return
+        appCtx = context.applicationContext
         stop()
         val myGen = ++generation
         val key = geminiKey(context)
@@ -145,7 +258,10 @@ object AgentSpeech {
             runCatching {
                 t.setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        // USAGE_MEDIA for the same routing reason as the
+                        // streamed path — the assistant volume group is
+                        // silent on these glasses.
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -158,9 +274,34 @@ object AgentSpeech {
     }
 
     private fun utter(t: android.speech.tts.TextToSpeech, text: String) {
+        // The keyboard must light on this path too — the device voice is
+        // what speaks whenever the network TTS is unreachable, which is
+        // exactly when the wearer most needs to see that something is
+        // happening. The engine reports its own start and end, so this is
+        // real audio rather than an optimistic guess.
+        runCatching {
+            t.setOnUtteranceProgressListener(
+                object : android.speech.tts.UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        setSpeaking(true)
+                        // Nothing to measure on this path; the readout
+                        // falls back to its own rhythm rather than
+                        // pretending to know the waveform.
+                        speechLevel = LEVEL_UNKNOWN
+                    }
+                    override fun onDone(utteranceId: String?) = setSpeaking(false)
+                    @Deprecated("required by the base class")
+                    override fun onError(utteranceId: String?) = setSpeaking(false)
+                    override fun onError(utteranceId: String?, errorCode: Int) =
+                        setSpeaking(false)
+                    override fun onStop(utteranceId: String?, interrupted: Boolean) =
+                        setSpeaking(false)
+                }
+            )
+        }
         runCatching {
             t.speak(text, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "x3hub-agent")
-        }.onFailure { Log.w(TAG, "device TTS speak failed", it) }
+        }.onFailure { Log.w(TAG, "device TTS speak failed", it); setSpeaking(false) }
     }
 
     /**
@@ -256,10 +397,18 @@ object AgentSpeech {
         val t = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
-                    // SPEECH, not MUSIC: this is the assistant talking, and the
-                    // distinction is what lets a page's own audio duck it
-                    // rather than fight it.
-                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    // USAGE_MEDIA, not USAGE_ASSISTANT. The intuitive choice is
+                    // ASSISTANT — this IS the assistant talking — but on this
+                    // hardware that usage routes to a STREAM_ASSISTANT volume
+                    // group the wearer never turns up, so the speech played
+                    // into silence: frames delivered, playback head advancing,
+                    // keyboard flashing, nothing audible. The model voice
+                    // (GeminiAudioPlayer) is heard precisely because it uses
+                    // USAGE_MEDIA -> STREAM_MUSIC, the volume the wearer
+                    // actually sets. Match it. Ducking still works: the
+                    // transient focus request below asks other media to drop
+                    // while she speaks.
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
@@ -274,7 +423,19 @@ object AgentSpeech {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         track = t
+        // Request audio focus before playing. Without it the model voice
+        // (GeminiAudioPlayer, which DOES request focus) was audible and the
+        // agent's own voice was not: on this hardware an ASSISTANT-usage
+        // track that holds no focus is delivered to the HAL — the frames
+        // count and the playback head advances, so it LOOKS like it played
+        // and the keyboard flashed — but it is never routed to the speaker.
+        // Transient, and it ducks rather than stops other audio, because an
+        // errand result is a short interjection over whatever is playing,
+        // not a takeover.
+        requestSpeechFocus()
         t.play()
+        // Audio is leaving the speaker from here — light the keys.
+        setSpeaking(true)
         var off = start
         while (off < wav.size && myGen == generation) {
             val n = t.write(wav, off, minOf(minBuf, wav.size - off))
@@ -296,12 +457,15 @@ object AgentSpeech {
             // track between the generation check above and this call.
             val pos = runCatching { t.playbackHeadPosition }.getOrNull() ?: break
             played = pos
+            speechLevel = levelAt(wav, start / BYTES_PER_FRAME + pos)
             if (pos >= totalFrames) break
             Thread.sleep(40)
         }
         if (myGen == generation) runCatching { t.stop() }
         runCatching { t.release() }
         if (track === t) track = null
+        abandonSpeechFocus()
+        setSpeaking(false)
         Log.i(
             TAG,
             "spoke ${played * 1000L / SAMPLE_RATE}ms of ${audioMs}ms" +

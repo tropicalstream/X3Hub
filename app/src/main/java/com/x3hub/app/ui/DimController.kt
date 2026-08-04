@@ -50,13 +50,17 @@ import java.util.Calendar
 class DimController(
     private val host: FrameLayout,
     /**
-     * Activity glyphs to show beside the battery — "✦" while a Gemini
-     * session is live, "⚙" while the page agent works. Sampled at draw
-     * time; the activity calls [refreshReadout] when either changes,
-     * because in dim this readout is the ONLY surface there is, and
-     * "still working" and "silently died" must not look identical.
+     * What the assistant is doing, as [AssistantState] bits — a live
+     * Gemini session, a working agent, both, or neither. Sampled at draw
+     * time; the activity calls [refreshReadout] when it changes, because
+     * in dim this readout is the ONLY surface there is, and "still
+     * working" and "silently died" must not look identical.
+     *
+     * This replaced a pair of text glyphs. A wearer should not have to
+     * recall what ✦ meant at a glance on a black screen; a figure who
+     * visibly listens, or visibly thinks, needs no legend.
      */
-    private val statusGlyphs: () -> String = { "" },
+    private val assistantState: () -> Int = { AssistantState.IDLE },
     private val onDimChanged: (Boolean) -> Unit = {}
 ) {
 
@@ -108,6 +112,11 @@ class DimController(
         // pass and make the next enter() a relayout instead of a redraw.
         blackout?.let {
             it.removeCallbacks(minuteTick)
+            // The assistant's animator outlives nothing: a repaint loop
+            // still ticking behind a torn-down readout is exactly the
+            // battery leak this app was built to avoid.
+            animating = false
+            it.removeCallbacks(animTick)
             it.visibility = View.INVISIBLE
         }
         forceBinocularRepaint()
@@ -136,9 +145,126 @@ class DimController(
         v.postDelayed(minuteTick, 60_000L - msIntoMinute + 250L)
     }
 
-    /** Repaint the readout now — a state glyph changed. No-op unless dimmed. */
+    /**
+     * Lift the blackout without leaving dim.
+     *
+     * Settings is the one page this app draws while dimmed, and it cannot
+     * simply be layered over the blackout: the panel lives inside
+     * unipanelOverlay, which is a SIBLING of this view, and Z ordering
+     * only competes between siblings — the blackout's elevation buries the
+     * whole overlay subtree no matter what elevation the panel gives
+     * itself. So the blackout steps aside for the duration.
+     *
+     * [dimmed] deliberately stays true: it is what keeps DimBridge set, so
+     * a window Gemini opens while the page is up is still the one
+     * invisible window rather than a new visible sibling. The input gates
+     * read the settings flag directly instead.
+     */
+    fun setBlackoutHidden(hidden: Boolean) {
+        if (!dimmed) return
+        val v = blackout ?: return
+        v.visibility = if (hidden) View.INVISIBLE else View.VISIBLE
+        if (hidden) {
+            v.removeCallbacks(minuteTick)
+            animating = false
+            animFrameMs = ANIM_FRAME_MS
+            animStartMs = 0L
+            v.removeCallbacks(animTick)
+        } else {
+            scheduleMinuteTick()
+            syncAnimator()
+            v.invalidate()
+        }
+        forceBinocularRepaint()
+    }
+
+    /** Repaint the readout now — the assistant's state changed. */
     fun refreshReadout() {
-        if (dimmed) blackout?.invalidate()
+        if (!dimmed) return
+        blackout?.invalidate()
+        syncAnimator()
+    }
+
+    // ── The assistant's animation ────────────────────────────────────
+    //
+    // Deliberately the ONLY thing in this app that can repaint faster than
+    // once a minute, and it runs only while she is thinking, talking or
+    // working. An idle or merely LISTENING figure is drawn once and left
+    // alone: a pulse that never stopped would keep the projector and the
+    // GPU awake through the whole standby this app exists to make cheap.
+    //
+    // Talking gets the fast rate because the mouth tracks live audio, and
+    // at 80ms speech looks like chewing. Thinking and working only swell
+    // three dots, which reads fine at 12fps.
+
+    private var animStartMs = 0L
+    private var animating = false
+    private var animFrameMs = ANIM_FRAME_MS
+
+    private val animTick = object : Runnable {
+        override fun run() {
+            val v = blackout ?: return
+            if (!dimmed || !animating) return
+            // Re-decide every frame rather than trusting the flag set when
+            // the loop started. Talking is now answered by the audio player
+            // (does the speaker still have audio?), and nothing publishes an
+            // event when the last sample drains — so a loop that only
+            // stopped on an external notification would keep repainting at
+            // 30fps against a black screen forever, which is precisely the
+            // drain this app exists to avoid.
+            if (!AssistantState.wantsAnimation(assistantState())) {
+                animating = false
+                animFrameMs = ANIM_FRAME_MS
+                animStartMs = 0L
+                v.invalidate()
+                return
+            }
+            v.invalidate()
+            v.postDelayed(this, animFrameMs)
+        }
+    }
+
+    /** Start or stop the animation to match what the assistant is doing. */
+    private fun syncAnimator() {
+        val v = blackout ?: return
+        val wants = dimmed && AssistantState.wantsAnimation(assistantState())
+        // The rate can change without the animator stopping — she starts
+        // talking mid-errand — so re-post on a rate change too, or the
+        // mouth would keep running at the dots' lazy 12fps.
+        //
+        // Three things need the fast rate, all for the same reason: they
+        // track something the wearer can HEAR or read as motion. Her mouth
+        // follows live audio; the keyboard flashes to the agent's voice,
+        // which is sampled every 40ms and would strobe at 12fps; and the
+        // fingers type, which at 12fps looks like stamping rather than
+        // typing. Dots alone can stay lazy.
+        val st = assistantState()
+        val rate = if (AssistantState.hasTalking(st) ||
+            AssistantState.hasAgentSpeaking(st) ||
+            AssistantState.hasAgent(st)
+        ) {
+            ANIM_FRAME_TALK_MS
+        } else {
+            ANIM_FRAME_MS
+        }
+        if (wants == animating && rate == animFrameMs) return
+        animating = wants
+        animFrameMs = rate
+        v.removeCallbacks(animTick)
+        if (wants) {
+            if (animStartMs == 0L) animStartMs = android.os.SystemClock.uptimeMillis()
+            v.post(animTick)
+        } else {
+            animStartMs = 0L
+            v.invalidate()
+        }
+    }
+
+    /** 0..1 sawtooth over [ANIM_PERIOD_MS]; 0 while still. */
+    private fun animPhase(): Float {
+        if (!animating) return 0f
+        val dt = android.os.SystemClock.uptimeMillis() - animStartMs
+        return ((dt % ANIM_PERIOD_MS).toFloat() / ANIM_PERIOD_MS)
     }
 
     /**
@@ -177,6 +303,20 @@ class DimController(
         }
 
         /**
+         * The tube around the text. Neon is a bright core inside a
+         * saturated halo, so the readout is drawn twice: this wide, faint,
+         * fully-coloured stroke first, then [textPaint]'s near-white fill
+         * on top. Two draws of a nine-character string, once a minute.
+         */
+        private val textGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = READOUT_TEXT_DP * density
+            textAlign = Paint.Align.CENTER
+            style = Paint.Style.STROKE
+            strokeJoin = Paint.Join.ROUND
+            strokeCap = Paint.Cap.ROUND
+        }
+
+        /**
          * Activity glyphs get their own paint: the same steel cyan the HUD
          * strip uses for them, held brighter than the text by a fixed ratio
          * so the state light stays the readout's loudest element at every
@@ -194,9 +334,16 @@ class DimController(
         /** Re-derive both alphas from [readoutBrightness]. */
         fun applyBrightness() {
             val textAlpha = (readoutBrightness * 255f).toInt().coerceIn(13, 255)
-            val glyphAlpha = (textAlpha * GLYPH_OVER_TEXT).toInt().coerceIn(textAlpha, 255)
-            textPaint.color = (textAlpha shl 24) or 0x00FFFFFF
-            glyphPaint.color = (glyphAlpha shl 24) or (GLYPH_RGB and 0x00FFFFFF)
+            // Core: the neon hue pushed most of the way to white. A pure
+            // white core would lose the colour entirely at this size;
+            // pure cyan without the whitening reads as a flat coloured
+            // font rather than something lit.
+            textPaint.style = Paint.Style.FILL
+            textPaint.color = ((textAlpha * 1.7f).toInt().coerceIn(150, 255) shl 24) or NEON_TEXT_CORE
+            // Halo: the saturated hue, wide and faint around the core.
+            val haloAlpha = (textAlpha * 1.2f).toInt().coerceIn(80, 255)
+            textGlowPaint.color = (haloAlpha shl 24) or NEON_TEXT_RGB
+            textGlowPaint.strokeWidth = READOUT_TEXT_DP * density * 0.30f
         }
 
         init {
@@ -232,14 +379,47 @@ class DimController(
             val battery = batteryPercent()?.let { "$it%" } ?: ""
             val line = if (battery.isEmpty()) time else "$time   $battery"
             val baseline = height - READOUT_BOTTOM_INSET_DP * density
+            canvas.drawText(line, width * 0.5f, baseline, textGlowPaint)
             canvas.drawText(line, width * 0.5f, baseline, textPaint)
-            val glyphs = statusGlyphs()
-            if (glyphs.isNotEmpty()) {
-                // To the RIGHT of the centred line rather than inside it, so
-                // the time does not shift sideways when a session starts.
-                val lineEnd = width * 0.5f + textPaint.measureText(line) * 0.5f
-                canvas.drawText(glyphs, lineEnd + GLYPH_GAP_DP * density, baseline, glyphPaint)
-            }
+
+            // The assistant, where the ✦/⚙ glyphs used to be: to the RIGHT
+            // of the centred line rather than inside it, so the time never
+            // shifts sideways when a session starts. She is drawn at every
+            // state including idle — a readout whose only occupant appears
+            // and vanishes reads as a fault, and her being faintly THERE is
+            // what makes "dimmed" distinguishable from "dead".
+            val figureSize = READOUT_TEXT_DP * density * ASSISTANT_SCALE
+            val lineEnd = width * 0.5f + textPaint.measureText(line) * 0.5f
+            AssistantFigure.draw(
+                canvas = canvas,
+                cx = lineEnd + GLYPH_GAP_DP * density + figureSize * 0.5f,
+                // Lifted clear of the text's baseline rather than centred on
+                // it, and lifted TWICE now. At scale 2 a half-line nudge was
+                // enough; at 4 her chin alone reached past the bottom of the
+                // 480px viewport; and the keyboard she works at reaches
+                // 0.81 x size below centre, another 16px down. Measured
+                // rather than eyeballed: her full extent is ~76px, which at
+                // 0.62 x size above the baseline puts the thinking-dots at
+                // y=396 and the keyboard's lowest ink at y=471, inside the
+                // display with room to spare at every inset the readout
+                // uses. She simply floats a little above the time now,
+                // which on a black display has no edge to look wrong
+                // against.
+                cy = baseline - figureSize * 0.62f,
+                size = figureSize,
+                state = assistantState(),
+                phase = animPhase(),
+                // Live model-audio amplitude: her mouth moves to the actual
+                // speech. Sampled at draw time so it is never a frame stale.
+                // The playback head, not the network arrival — see
+                // GeminiAudioPlayer.liveLevel().
+                level = com.x3hub.app.core.audio.GeminiAudioPlayer.liveLevel(),
+                // The AGENT's voice, measured at its playback head, so the
+                // keyboard flashes on the syllables the wearer is hearing.
+                agentLevel = com.x3hub.app.core.agent.AgentSpeech.speechLevel,
+                paint = glyphPaint,
+                brightness = readoutBrightness
+            )
         }
 
         private fun batteryPercent(): Int? {
@@ -266,6 +446,42 @@ class DimController(
         const val GLYPH_OVER_TEXT = 1.75f
         const val GLYPH_GAP_DP = 8f
         const val READOUT_TEXT_DP = 12f
+
+        /**
+         * The assistant against the readout text. Two: the wearer asked
+         * for roughly twice the old glyphs, and at 12dp text that puts her
+         * at 24dp — big enough for a face to read as a face on this
+         * projector, small enough to stay a status light rather than
+         * becoming the display.
+         */
+        /**
+         * The assistant against the readout text. Four: she began at two
+         * (twice the old glyphs) and read as a small mark at arm's length
+         * on the waveguide, where features an eighth of a line tall merge
+         * into a blob. At four she is a face the wearer can actually read
+         * expression from, and still only a few lines tall on a display
+         * that is otherwise empty.
+         */
+        const val ASSISTANT_SCALE = 4f
+
+        /** Neon cyan for the readout's halo — the app's sign colour. */
+        const val NEON_TEXT_RGB = 0x0000E5FF
+
+        /** Its white-hot filament. */
+        const val NEON_TEXT_CORE = 0x00CFF9FF
+
+        /** ~12fps for swelling dots. Gentle, and cheap. */
+        const val ANIM_FRAME_MS = 80L
+
+        /**
+         * ~30fps while she speaks. The mouth follows live audio, and below
+         * about 25fps that reads as chewing rather than talking. Paid only
+         * for the seconds she is actually speaking.
+         */
+        const val ANIM_FRAME_TALK_MS = 33L
+
+        /** One full cycle of the working animation. */
+        const val ANIM_PERIOD_MS = 2200L
         /**
          * Clear of the very last rows: the waveguide's edge rows are the
          * first to distort on this projector, and the readout is the only

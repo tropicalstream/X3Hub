@@ -21,6 +21,30 @@ class GeminiAudioPlayer(context: Context) {
     var onDrainComplete: (() -> Unit)? = null
 
     companion object {
+        /**
+         * The one player this process runs, so a HUD can ask what is
+         * sounding without threading a reference through the service
+         * binder, the activity and the readout. Assigned in init; a second
+         * instance would simply take over, which is correct — the newest
+         * player is the one making noise.
+         */
+        @Volatile private var active: GeminiAudioPlayer? = null
+
+        /**
+         * Loudness of the model audio LEAVING THE SPEAKER right now, 0..1.
+         *
+         * Not the level of what just arrived from the network. Gemini
+         * streams its reply faster than real time, so arrival peaks run
+         * progressively ahead of the speaker — a mouth driven by them
+         * moves to syllables the wearer has not heard yet, and finishes
+         * while she is still talking. This reads the playback head
+         * instead.
+         */
+        fun liveLevel(): Float = active?.levelNow() ?: 0f
+
+        /** True while there is model audio still to come out of the speaker. */
+        fun isSpeaking(): Boolean = active?.stillPlaying() ?: false
+
         private const val TAG = "GeminiAudioPlayer"
         private const val DEFAULT_SAMPLE_RATE = 24_000
         /**
@@ -30,6 +54,10 @@ class GeminiAudioPlayer(context: Context) {
          * per-slice overhead.
          */
         private const val SLICE_BYTES = 16 * 1024
+    }
+
+    init {
+        active = this
     }
 
     private val appContext = context.applicationContext
@@ -45,6 +73,90 @@ class GeminiAudioPlayer(context: Context) {
     private var drainThread: Thread? = null
     @Volatile private var lastOutputLevel = 0f
     @Volatile private var lastOutputAtMs = 0L
+
+    // ── Level timeline ───────────────────────────────────────────────
+    //
+    // What the speaker is playing, indexed by frame. Each chunk is split
+    // into ~40ms windows, each stamped with the absolute frame at which it
+    // will sound; the drawing side then asks what is sounding NOW and gets
+    // the window the playback head is inside. This is the whole mechanism
+    // that makes her mouth match the voice rather than lead it.
+    //
+    // Frames are counted against the CURRENT track. Anything that replaces
+    // or flushes the track resets both the counter and the timeline,
+    // because playbackHeadPosition restarts with it.
+    private val timelineLock = Any()
+    private val levelFrames = ArrayDeque<Long>()
+    private val levelValues = ArrayDeque<Float>()
+    private var framesWritten = 0L
+
+    private fun resetTimelineLocked() {
+        levelFrames.clear()
+        levelValues.clear()
+        framesWritten = 0L
+    }
+
+    /** Split a chunk into ~40ms windows and stamp each with its play time. */
+    private fun stampLevels(data: ByteArray, sampleRate: Int) {
+        val windowFrames = (sampleRate / 25).coerceAtLeast(1)   // 40ms
+        val windowBytes = windowFrames * 2
+        synchronized(timelineLock) {
+            var off = 0
+            while (off < data.size - 1) {
+                val end = minOf(off + windowBytes, data.size)
+                var sum = 0.0
+                var n = 0
+                var i = off
+                // Every eighth frame describes the envelope well enough and
+                // keeps this off the audio thread's critical path.
+                while (i < end - 1) {
+                    val v = ((data[i + 1].toInt() shl 8) or
+                        (data[i].toInt() and 0xFF)).toShort().toInt()
+                    sum += v.toDouble() * v
+                    n++
+                    i += 16
+                }
+                val rms = if (n == 0) 0.0 else kotlin.math.sqrt(sum / n) / 32768.0
+                levelFrames.addLast(framesWritten + (off / 2).toLong())
+                // Speech RMS rarely passes ~0.25, so scale into a usable range.
+                levelValues.addLast((rms * 4.0).coerceIn(0.0, 1.0).toFloat())
+                off = end
+            }
+            framesWritten += (data.size / 2).toLong()
+            // Keep the timeline bounded; anything behind the head is spent.
+            while (levelFrames.size > 4096) {
+                levelFrames.removeFirst()
+                levelValues.removeFirst()
+            }
+        }
+    }
+
+    /** Loudness of the window the playback head is currently inside. */
+    private fun levelNow(): Float {
+        val head = synchronized(lock) {
+            val t = audioTrack ?: return 0f
+            runCatching { t.playbackHeadPosition.toLong() }.getOrNull() ?: return 0f
+        }
+        synchronized(timelineLock) {
+            // Drop everything the speaker has already passed, keeping the
+            // most recent one as the answer.
+            var value = 0f
+            while (levelFrames.isNotEmpty() && levelFrames.first() <= head) {
+                levelFrames.removeFirst()
+                value = levelValues.removeFirst()
+            }
+            return value
+        }
+    }
+
+    /** True while written audio has not yet all left the speaker. */
+    private fun stillPlaying(): Boolean {
+        val head = synchronized(lock) {
+            val t = audioTrack ?: return false
+            runCatching { t.playbackHeadPosition.toLong() }.getOrNull() ?: return false
+        }
+        synchronized(timelineLock) { return head < framesWritten }
+    }
     /**
      * Monotonically increasing "write generation". Every call to stopAndFlush()
      * or release() bumps this. A playChunk loop that sees its generation is
@@ -116,6 +228,10 @@ class GeminiAudioPlayer(context: Context) {
             }
             myGeneration = writeGeneration
         }
+        // Stamp this chunk onto the level timeline before it is written, so
+        // the drawing side can ask what is sounding at any moment. Outside
+        // the track lock: it only touches the timeline's own lock.
+        stampLevels(data, sampleRate)
 
         // Write in small NON-BLOCKING slices so we can observe stopAndFlush()
         // (which bumps writeGeneration) and bail out immediately. A single
@@ -293,6 +409,10 @@ class GeminiAudioPlayer(context: Context) {
 
     fun stopAndFlush() {
         drainPending = false
+        // flush() zeroes playbackHeadPosition, so every stamp in the
+        // timeline would suddenly sit in the future and the mouth would
+        // freeze open on the last level it saw. Clear both together.
+        synchronized(timelineLock) { resetTimelineLocked() }
         // Bump the generation OUTSIDE the lock so any playChunk loop still
         // holding a generation snapshot will see it change and exit on its
         // next slice check, without waiting for the lock.
@@ -332,6 +452,10 @@ class GeminiAudioPlayer(context: Context) {
             return existing
         }
 
+        // A new track counts frames from zero again, so a timeline stamped
+        // against the old one would point the playback head at the wrong
+        // syllables — reset it with the track.
+        synchronized(timelineLock) { resetTimelineLocked() }
         runCatching {
             existing?.pause()
             existing?.flush()
